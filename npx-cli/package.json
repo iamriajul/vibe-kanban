@@ -1,19 +1,22 @@
 {
-  "name": "vibe-kanban",
+  "name": "@iamriajul/vibe-kanban",
   "private": false,
-  "version": "0.1.6",
+  "version": "0.1.6-20260206164631",
   "main": "index.js",
   "bin": {
     "vibe-kanban": "bin/cli.js"
   },
   "keywords": [],
-  "author": "bloop",
+  "author": "iamriajul",
   "repository": {
     "type": "git",
-    "url": "https://github.com/BloopAI/vibe-kanban"
+    "url": "https://github.com/iamriajul/vibe-kanban"
   },
   "license": "",
   "description": "NPX wrapper around vibe-kanban and vibe-kanban-mcp",
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "adm-zip": "^0.5.16"
   },
