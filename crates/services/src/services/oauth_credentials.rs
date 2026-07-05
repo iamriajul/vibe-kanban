@@ -95,6 +95,10 @@ impl OAuthCredentials {
     }
 
     async fn save_to_file(&self, creds: &StoredCredentials) -> std::io::Result<()> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
         let tmp = self.path.with_extension("tmp");
 
         let file = {

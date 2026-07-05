@@ -3,10 +3,11 @@ use api_types::{
 };
 use axum::{
     Json, Router,
+    body::Bytes,
     extract::{Extension, Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -21,7 +22,7 @@ use crate::{
     AppState,
     attachments::thumbnail::ThumbnailService,
     auth::RequestContext,
-    azure_blob::AzureBlobError,
+    r2::R2Error,
     db::{
         attachments::{AttachmentError, AttachmentRepository},
         blobs::{BlobError, BlobRepository},
@@ -52,6 +53,10 @@ pub fn router() -> Router<AppState> {
             "/comments/{comment_id}/attachments/commit",
             post(commit_comment_attachments),
         )
+}
+
+pub fn public_router() -> Router<AppState> {
+    Router::new().route("/attachments/upload/{upload_id}", put(upload_pending_upload))
 }
 
 #[derive(Debug, Serialize, Deserialize, TS)]
@@ -100,10 +105,10 @@ pub struct CommitAttachmentsResponse {
 
 #[derive(Debug, thiserror::Error)]
 pub enum RouteError {
-    #[error("Azure Blob storage not configured")]
+    #[error("R2 storage not configured")]
     NotConfigured,
-    #[error("Azure Blob error: {0}")]
-    AzureBlob(#[from] AzureBlobError),
+    #[error("R2 storage error: {0}")]
+    R2(#[from] R2Error),
     #[error("attachment error: {0}")]
     Attachment(#[from] AttachmentError),
     #[error("blob error: {0}")]
@@ -131,8 +136,8 @@ impl IntoResponse for RouteError {
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Attachment storage not available",
             ),
-            RouteError::AzureBlob(e) => {
-                tracing::error!(error = %e, "Azure Blob error");
+            RouteError::R2(e) => {
+                tracing::error!(error = %e, "R2 storage error");
                 (StatusCode::INTERNAL_SERVER_ERROR, "Storage error")
             }
             RouteError::Attachment(e) => {
@@ -187,8 +192,8 @@ async fn init_upload(
     if let Some(existing) =
         BlobRepository::find_by_hash(state.pool(), payload.project_id, &payload.hash).await?
     {
-        let azure = state.azure_blob().ok_or(RouteError::NotConfigured)?;
-        let read_url = azure.create_read_url(&existing.blob_path)?;
+        let r2 = state.r2().ok_or(RouteError::NotConfigured)?;
+        let read_url = r2.create_read_url(&existing.blob_path).await?;
 
         return Ok(Json(InitUploadResponse {
             upload_url: read_url,
@@ -199,7 +204,7 @@ async fn init_upload(
         }));
     }
 
-    let azure = state.azure_blob().ok_or(RouteError::NotConfigured)?;
+    state.r2().ok_or(RouteError::NotConfigured)?;
     let sanitized_filename = sanitize_filename(&payload.filename);
     let blob_path = format!(
         "attachments/{}/{}_{}",
@@ -207,24 +212,65 @@ async fn init_upload(
         Uuid::new_v4(),
         sanitized_filename
     );
-    let upload = azure.create_upload_url(&blob_path)?;
+
+    let expires_at = Utc::now() + chrono::Duration::minutes(5);
 
     let pending = PendingUploadRepository::create(
         state.pool(),
         payload.project_id,
-        upload.blob_path,
+        blob_path,
         payload.hash.clone(),
-        upload.expires_at,
+        expires_at,
     )
     .await?;
 
+    let upload_url = format!(
+        "{}/v1/attachments/upload/{}",
+        state.server_public_base_url.trim_end_matches('/'),
+        pending.id
+    );
+
     Ok(Json(InitUploadResponse {
-        upload_url: upload.upload_url,
+        upload_url,
         upload_id: pending.id,
-        expires_at: upload.expires_at,
+        expires_at,
         skip_upload: false,
         existing_blob_id: None,
     }))
+}
+
+#[instrument(name = "attachments.upload_pending", skip(state, headers, body), fields(upload_id = %upload_id))]
+async fn upload_pending_upload(
+    State(state): State<AppState>,
+    Path(upload_id): Path<Uuid>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<StatusCode, RouteError> {
+    if body.len() as i64 > MAX_FILE_SIZE {
+        return Err(RouteError::FileTooLarge);
+    }
+
+    let pending = PendingUploadRepository::find_by_id(state.pool(), upload_id)
+        .await?
+        .ok_or(RouteError::UploadNotFound)?;
+
+    if pending.expires_at < Utc::now() {
+        return Err(RouteError::UploadNotFound);
+    }
+
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| !v.is_empty())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+
+    let r2 = state.r2().ok_or(RouteError::NotConfigured)?;
+    r2.upload_blob(&pending.blob_path, body.to_vec(), content_type)
+        .await?;
+
+    // Keep legacy client compatibility: existing uploader treats 201 as success.
+    Ok(StatusCode::CREATED)
 }
 
 #[instrument(name = "attachments.confirm_upload", skip(state, ctx, payload), fields(project_id = %payload.project_id, user_id = %ctx.user.id))]
@@ -248,7 +294,7 @@ async fn confirm_upload(
             .map_err(|_| RouteError::AccessDenied)?;
     }
 
-    let azure = state.azure_blob().ok_or(RouteError::NotConfigured)?;
+    let r2 = state.r2().ok_or(RouteError::NotConfigured)?;
 
     let blob = if let Some(existing) =
         BlobRepository::find_by_hash(state.pool(), payload.project_id, &payload.hash).await?
@@ -259,15 +305,18 @@ async fn confirm_upload(
             .await?
             .ok_or(RouteError::UploadNotFound)?;
 
-        let blob_path = &pending.blob_path;
+        if pending.expires_at < Utc::now() {
+            return Err(RouteError::UploadNotFound);
+        }
 
-        let props = azure.get_blob_properties(blob_path).await?;
+        let blob_path = &pending.blob_path;
+        let props = r2.get_blob_properties(blob_path).await?;
         if props.content_length > MAX_FILE_SIZE {
-            let _ = azure.delete_blob(blob_path).await;
+            let _ = r2.delete_blob(blob_path).await;
             return Err(RouteError::FileTooLarge);
         }
 
-        let blob_data = azure.download_blob(blob_path).await?;
+        let blob_data = r2.download_blob(blob_path).await?;
         let thumbnail_result =
             ThumbnailService::generate(&blob_data, payload.content_type.as_deref())
                 .map_err(|e| RouteError::ThumbnailError(e.to_string()))?;
@@ -277,7 +326,7 @@ async fn confirm_upload(
         let (thumbnail_blob_path, width, height) = match thumbnail_result {
             Some(thumb) => {
                 let thumb_path = format!("thumbnails/{}", blob_path);
-                azure
+                r2
                     .upload_blob(&thumb_path, thumb.bytes, thumb.mime_type)
                     .await?;
                 (
@@ -372,18 +421,19 @@ async fn list_issue_attachments(
         .await
         .map_err(|_| RouteError::AccessDenied)?;
 
-    let azure = state.azure_blob();
-    let attachments = AttachmentRepository::find_by_issue_id(state.pool(), issue_id)
-        .await?
-        .into_iter()
-        .map(|a| {
-            let file_url = azure.and_then(|az| az.create_read_url(&a.blob_path).ok());
-            AttachmentWithUrl {
-                attachment: a,
-                file_url,
-            }
-        })
-        .collect();
+    let r2 = state.r2();
+    let mut attachments = Vec::new();
+    for attachment in AttachmentRepository::find_by_issue_id(state.pool(), issue_id).await? {
+        let file_url = if let Some(service) = r2 {
+            service.create_read_url(&attachment.blob_path).await.ok()
+        } else {
+            None
+        };
+        attachments.push(AttachmentWithUrl {
+            attachment,
+            file_url,
+        });
+    }
     Ok(Json(ListAttachmentsResponse { attachments }))
 }
 
@@ -397,18 +447,19 @@ async fn list_comment_attachments(
         .await
         .map_err(|_| RouteError::AccessDenied)?;
 
-    let azure = state.azure_blob();
-    let attachments = AttachmentRepository::find_by_comment_id(state.pool(), comment_id)
-        .await?
-        .into_iter()
-        .map(|a| {
-            let file_url = azure.and_then(|az| az.create_read_url(&a.blob_path).ok());
-            AttachmentWithUrl {
-                attachment: a,
-                file_url,
-            }
-        })
-        .collect();
+    let r2 = state.r2();
+    let mut attachments = Vec::new();
+    for attachment in AttachmentRepository::find_by_comment_id(state.pool(), comment_id).await? {
+        let file_url = if let Some(service) = r2 {
+            service.create_read_url(&attachment.blob_path).await.ok()
+        } else {
+            None
+        };
+        attachments.push(AttachmentWithUrl {
+            attachment,
+            file_url,
+        });
+    }
     Ok(Json(ListAttachmentsResponse { attachments }))
 }
 
@@ -424,8 +475,8 @@ async fn get_attachment_file(
 
     ensure_attachment_access(&state, ctx.user.id, &attachment).await?;
 
-    let azure = state.azure_blob().ok_or(RouteError::NotConfigured)?;
-    let url = azure.create_read_url(&attachment.blob_path)?;
+    let r2 = state.r2().ok_or(RouteError::NotConfigured)?;
+    let url = r2.create_read_url(&attachment.blob_path).await?;
     Ok(Json(AttachmentUrlResponse { url }))
 }
 
@@ -444,8 +495,8 @@ async fn get_attachment_thumbnail(
     let thumbnail_path = attachment
         .thumbnail_blob_path
         .ok_or(RouteError::NoThumbnail)?;
-    let azure = state.azure_blob().ok_or(RouteError::NotConfigured)?;
-    let url = azure.create_read_url(&thumbnail_path)?;
+    let r2 = state.r2().ok_or(RouteError::NotConfigured)?;
+    let url = r2.create_read_url(&thumbnail_path).await?;
     Ok(Json(AttachmentUrlResponse { url }))
 }
 
@@ -468,12 +519,12 @@ async fn delete_attachment(
     if remaining == 0
         && let Some(blob) = BlobRepository::delete(state.pool(), blob_id).await?
     {
-        let azure = state.azure_blob().ok_or(RouteError::NotConfigured)?;
-        if let Err(e) = azure.delete_blob(&blob.blob_path).await {
+        let r2 = state.r2().ok_or(RouteError::NotConfigured)?;
+        if let Err(e) = r2.delete_blob(&blob.blob_path).await {
             tracing::warn!(error = %e, blob_path = %blob.blob_path, "Failed to delete blob");
         }
         if let Some(thumb_path) = blob.thumbnail_blob_path
-            && let Err(e) = azure.delete_blob(&thumb_path).await
+            && let Err(e) = r2.delete_blob(&thumb_path).await
         {
             tracing::warn!(error = %e, blob_path = %thumb_path, "Failed to delete thumbnail");
         }

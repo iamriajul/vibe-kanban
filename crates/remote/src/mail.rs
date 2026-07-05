@@ -6,9 +6,9 @@ use serde_json::json;
 
 use crate::digest::DigestError;
 
-const DEFAULT_INVITE_TEMPLATE_ID: &str = "cmhvy2wgs3s13z70i1pxakij9";
-const DEFAULT_REVIEW_READY_TEMPLATE_ID: &str = "cmj47k5ge16990iylued9by17";
-const DEFAULT_REVIEW_FAILED_TEMPLATE_ID: &str = "cmj49ougk1c8s0iznavijdqpo";
+const DEFAULT_INVITE_TEMPLATE_ID: &str = "cmlb3zqwe03960i159htyb93d";
+const DEFAULT_REVIEW_READY_TEMPLATE_ID: &str = "cmlb45ki603ia0i1pdiq2ekyr";
+const DEFAULT_REVIEW_FAILED_TEMPLATE_ID: &str = "cmlb44vqe03p90i04bwkfqjv3";
 
 fn env_or(var: &str, default: &str) -> String {
     std::env::var(var)

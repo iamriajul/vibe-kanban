@@ -7,6 +7,7 @@ import {
   DropdownMenuTrigger,
 } from '@vibe/ui/components/DropdownMenu';
 import { Label } from '@vibe/ui/components/Label';
+import { getAgentName } from '@/shared/components/AgentIcon';
 import type { ExecutorProfileId, BaseCodingAgent } from 'shared/types';
 
 interface AgentSelectorProps {
@@ -51,7 +52,7 @@ export function AgentSelector({
           >
             <div className="flex items-center gap-1.5 w-full">
               <Bot className="h-3 w-3" />
-              <span className="truncate">{selectedAgent || 'Agent'}</span>
+              <span className="truncate">{getAgentName(selectedAgent)}</span>
             </div>
             <ArrowDown className="h-3 w-3" />
           </Button>
@@ -73,7 +74,7 @@ export function AgentSelector({
                 }}
                 className={selectedAgent === agent ? 'bg-accent' : ''}
               >
-                {agent}
+                {getAgentName(agent)}
               </DropdownMenuItem>
             ))
           )}

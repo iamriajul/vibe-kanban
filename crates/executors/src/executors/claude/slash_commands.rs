@@ -155,6 +155,10 @@ impl ClaudeCode {
                     description: Some("Review a pull request".to_string()),
                 },
                 SlashCommandDescription {
+                    name: "goal".to_string(),
+                    description: Some("Manage a long-running agent goal".to_string()),
+                },
+                SlashCommandDescription {
                     name: "security-review".to_string(),
                     description: Some(
                         "Complete a security review of the pending changes on the current branch"
@@ -194,9 +198,13 @@ impl ClaudeCode {
     async fn build_slash_commands_discovery_command_builder(
         &self,
     ) -> Result<CommandBuilder, CommandBuildError> {
-        let mut builder =
-            CommandBuilder::new(base_command(self.claude_code_router.unwrap_or(false)))
-                .params(["-p"]);
+        // Cladup's stream-json emulation omits Claude system init records, while discovery
+        // depends on those records. Runtime turns still honor the Cladup setting.
+        let mut builder = CommandBuilder::new(base_command(
+            self.claude_code_router.unwrap_or(false),
+            false,
+        ))
+        .params(["-p"]);
 
         builder = builder.extend_params([
             "--verbose",

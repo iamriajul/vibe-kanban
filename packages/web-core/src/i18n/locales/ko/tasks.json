@@ -395,6 +395,7 @@
       "loading": "로딩 중",
       "send": "보내기",
       "sending": "보내는 중",
+      "steer": "Steer",
       "queue": "대기열에 추가",
       "cancelQueue": "대기열 취소",
       "requestChanges": "변경 요청",

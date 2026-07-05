@@ -323,6 +323,29 @@ impl GitService {
         Ok(true)
     }
 
+    pub fn commit_as(
+        &self,
+        path: &Path,
+        message: &str,
+        name: &str,
+        email: &str,
+    ) -> Result<bool, GitServiceError> {
+        let git = GitCli::new();
+        let has_changes = git
+            .has_changes(path)
+            .map_err(|e| GitServiceError::InvalidRepository(format!("git status failed: {e}")))?;
+        if !has_changes {
+            tracing::debug!("No changes to commit!");
+            return Ok(false);
+        }
+
+        git.add_all(path)
+            .map_err(|e| GitServiceError::InvalidRepository(format!("git add failed: {e}")))?;
+        git.commit_with_identity(path, message, name, email)
+            .map_err(|e| GitServiceError::InvalidRepository(format!("git commit failed: {e}")))?;
+        Ok(true)
+    }
+
     /// Get worktree diffs against a base commit
     pub fn get_diffs(
         &self,

@@ -556,3 +556,30 @@ impl ExecutorConfigs {
         Ok(ExecutorProfileId::new(selected))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_include_kimi_code_profile() {
+        let defaults = ExecutorConfigs::from_defaults();
+        let profile_id = ExecutorProfileId::new(BaseCodingAgent::KimiCode);
+
+        assert!(defaults.get_coding_agent(&profile_id).is_some());
+        assert!(defaults.executors.contains_key(&BaseCodingAgent::KimiCode));
+    }
+
+    #[test]
+    fn defaults_include_antigravity_profile() {
+        let defaults = ExecutorConfigs::from_defaults();
+        let profile_id = ExecutorProfileId::new(BaseCodingAgent::AntiGravity);
+
+        assert!(defaults.get_coding_agent(&profile_id).is_some());
+        assert!(
+            defaults
+                .executors
+                .contains_key(&BaseCodingAgent::AntiGravity)
+        );
+    }
+}

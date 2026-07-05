@@ -105,6 +105,7 @@ pub fn router(state: AppState) -> Router {
         .merge(oauth::public_router())
         .merge(organization_members::public_router())
         .merge(tokens::public_router())
+        .merge(attachments::public_router())
         .merge(review::public_router())
         .merge(github_app::public_router())
         .merge(billing::public_router());

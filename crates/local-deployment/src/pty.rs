@@ -50,6 +50,7 @@ impl PtyService {
         working_dir: PathBuf,
         cols: u16,
         rows: u16,
+        git_identity: Option<(String, String)>,
     ) -> Result<(Uuid, mpsc::UnboundedReceiver<Vec<u8>>), PtyError> {
         let session_id = Uuid::new_v4();
         let (output_tx, output_rx) = mpsc::unbounded_channel();
@@ -81,6 +82,7 @@ impl PtyService {
             } else {
                 // Unix shells
                 cmd.env("VIBE_KANBAN_TERMINAL", "1");
+                cmd.env_remove("XDG_DATA_HOME");
 
                 if shell_name == "bash" {
                     cmd.env("PROMPT_COMMAND", r#"PS1='$ '; unset PROMPT_COMMAND"#);
@@ -93,6 +95,12 @@ impl PtyService {
 
             cmd.env("TERM", "xterm-256color");
             cmd.env("COLORTERM", "truecolor");
+            if let Some((name, email)) = &git_identity {
+                cmd.env("GIT_AUTHOR_NAME", name);
+                cmd.env("GIT_AUTHOR_EMAIL", email);
+                cmd.env("GIT_COMMITTER_NAME", name);
+                cmd.env("GIT_COMMITTER_EMAIL", email);
+            }
 
             let child = pty_pair
                 .slave

@@ -1353,6 +1353,9 @@ impl ToolCallState {
             } => ActionType::TaskCreate {
                 description: description.clone().unwrap_or_default(),
                 subagent_type: subagent_type.clone(),
+                prompt: description.clone(),
+                model: None,
+                effort: None,
                 result: output
                     .as_deref()
                     .map(|o| ToolResult::markdown(o.to_string())),

@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{error::Error as StdError, time::Duration};
 
 use aws_credential_types::Credentials;
 use aws_sdk_s3::{
@@ -32,6 +32,18 @@ pub struct PresignedUpload {
     pub expires_at: DateTime<Utc>,
 }
 
+#[derive(Debug)]
+pub struct AttachmentUpload {
+    pub upload_url: String,
+    pub blob_path: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug)]
+pub struct BlobProperties {
+    pub content_length: i64,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum R2Error {
     #[error("presign config error: {0}")]
@@ -40,6 +52,21 @@ pub enum R2Error {
     Presign(String),
     #[error("upload error: {0}")]
     Upload(String),
+    #[error("storage error: {0}")]
+    Storage(String),
+}
+
+fn format_error_chain<E: StdError>(err: &E) -> String {
+    let mut message = err.to_string();
+    let mut source = err.source();
+
+    while let Some(cause) = source {
+        message.push_str(": ");
+        message.push_str(&cause.to_string());
+        source = cause.source();
+    }
+
+    message
 }
 
 impl R2Service {
@@ -99,7 +126,7 @@ impl R2Service {
         let presigned = request
             .presigned(presigning_config)
             .await
-            .map_err(|e| R2Error::Presign(e.to_string()))?;
+            .map_err(|e| R2Error::Presign(format_error_chain(&e)))?;
 
         let expires_at = Utc::now()
             + chrono::Duration::from_std(self.presign_expiry).unwrap_or(chrono::Duration::hours(1));
@@ -110,6 +137,124 @@ impl R2Service {
             folder_path,
             expires_at,
         })
+    }
+
+    pub async fn create_upload_url(
+        &self,
+        blob_path: &str,
+        content_type: Option<&str>,
+    ) -> Result<AttachmentUpload, R2Error> {
+        let presigning_config = PresigningConfig::builder()
+            .expires_in(self.presign_expiry)
+            .build()
+            .map_err(|e| R2Error::PresignConfig(e.to_string()))?;
+
+        let mut request = self
+            .client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(blob_path);
+
+        if let Some(ct) = content_type {
+            request = request.content_type(ct);
+        }
+
+        let presigned = request
+            .presigned(presigning_config)
+            .await
+            .map_err(|e| R2Error::Presign(format_error_chain(&e)))?;
+
+        let expires_at = Utc::now()
+            + chrono::Duration::from_std(self.presign_expiry).unwrap_or(chrono::Duration::hours(1));
+
+        Ok(AttachmentUpload {
+            upload_url: presigned.uri().to_string(),
+            blob_path: blob_path.to_string(),
+            expires_at,
+        })
+    }
+
+    pub async fn create_read_url(&self, blob_path: &str) -> Result<String, R2Error> {
+        let presigning_config = PresigningConfig::builder()
+            .expires_in(self.presign_expiry)
+            .build()
+            .map_err(|e| R2Error::PresignConfig(e.to_string()))?;
+
+        let presigned = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(blob_path)
+            .presigned(presigning_config)
+            .await
+            .map_err(|e| R2Error::Presign(format_error_chain(&e)))?;
+
+        Ok(presigned.uri().to_string())
+    }
+
+    pub async fn get_blob_properties(&self, blob_path: &str) -> Result<BlobProperties, R2Error> {
+        let output = self
+            .client
+            .head_object()
+            .bucket(&self.bucket)
+            .key(blob_path)
+            .send()
+            .await
+            .map_err(|e| R2Error::Storage(format_error_chain(&e)))?;
+
+        Ok(BlobProperties {
+            content_length: output.content_length().unwrap_or(0),
+        })
+    }
+
+    pub async fn download_blob(&self, blob_path: &str) -> Result<Vec<u8>, R2Error> {
+        let output = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(blob_path)
+            .send()
+            .await
+            .map_err(|e| R2Error::Storage(format_error_chain(&e)))?;
+
+        let body = output
+            .body
+            .collect()
+            .await
+            .map_err(|e| R2Error::Storage(format_error_chain(&e)))?;
+
+        Ok(body.into_bytes().to_vec())
+    }
+
+    pub async fn upload_blob(
+        &self,
+        blob_path: &str,
+        data: Vec<u8>,
+        content_type: String,
+    ) -> Result<(), R2Error> {
+        self.client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(blob_path)
+            .body(ByteStream::from(data))
+            .content_type(content_type)
+            .send()
+            .await
+            .map_err(|e| R2Error::Upload(format_error_chain(&e)))?;
+
+        Ok(())
+    }
+
+    pub async fn delete_blob(&self, blob_path: &str) -> Result<(), R2Error> {
+        self.client
+            .delete_object()
+            .bucket(&self.bucket)
+            .key(blob_path)
+            .send()
+            .await
+            .map_err(|e| R2Error::Storage(format_error_chain(&e)))?;
+
+        Ok(())
     }
 
     /// Upload bytes directly to R2 (for server-side uploads).
@@ -127,7 +272,7 @@ impl R2Service {
             .content_type("application/gzip")
             .send()
             .await
-            .map_err(|e| R2Error::Upload(e.to_string()))?;
+            .map_err(|e| R2Error::Upload(format_error_chain(&e)))?;
 
         Ok(folder_path)
     }

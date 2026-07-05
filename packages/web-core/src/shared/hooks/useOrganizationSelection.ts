@@ -3,7 +3,11 @@ import type {
   OrganizationWithRole,
   ListOrganizationsResponse,
 } from 'shared/types';
-import { useOrganizationStore } from '@/shared/stores/useOrganizationStore';
+import { useAuth } from '@/shared/hooks/auth/useAuth';
+import {
+  hydrateOrganizationSelectionForUser,
+  useOrganizationStore,
+} from '@/shared/stores/useOrganizationStore';
 
 interface UseOrganizationSelectionOptions {
   organizations: ListOrganizationsResponse | undefined;
@@ -13,6 +17,7 @@ interface UseOrganizationSelectionOptions {
 export function useOrganizationSelection(
   options: UseOrganizationSelectionOptions
 ) {
+  const { isLoaded, userId } = useAuth();
   const { organizations, onSelectionChange } = options;
   const selectedOrgId = useOrganizationStore((s) => s.selectedOrgId);
   const setSelectedOrgId = useOrganizationStore((s) => s.setSelectedOrgId);
@@ -21,6 +26,12 @@ export function useOrganizationSelection(
     () => organizations?.organizations ?? [],
     [organizations]
   );
+
+  // Scope persisted selection by signed-in user to avoid cross-user leakage.
+  useEffect(() => {
+    if (!isLoaded) return;
+    hydrateOrganizationSelectionForUser(userId);
+  }, [isLoaded, userId]);
 
   // Default to first available organization if none selected or selection is invalid
   useEffect(() => {

@@ -224,7 +224,11 @@ function renderToolUseEntry(
       <SubagentEntry
         description={action_type.description}
         subagentType={action_type.subagent_type}
+        model={action_type.model}
+        effort={action_type.effort}
+        prompt={action_type.prompt}
         result={action_type.result}
+        fallbackContent={entry.content}
         expansionKey={expansionKey}
         status={status}
         workspaceId={workspaceWithSession?.id}
@@ -979,7 +983,11 @@ function TodoManagementEntry({
 function SubagentEntry({
   description,
   subagentType,
+  model,
+  effort,
+  prompt,
   result,
+  fallbackContent,
   expansionKey,
   status,
   workspaceId,
@@ -987,14 +995,19 @@ function SubagentEntry({
 }: {
   description: string;
   subagentType: string | null | undefined;
+  model: string | null | undefined;
+  effort: string | null | undefined;
+  prompt: string | null | undefined;
   result: ToolResult | null | undefined;
+  fallbackContent: string;
   expansionKey: string;
   status: ToolStatus;
   workspaceId: string | undefined;
   sessionId: string | undefined;
 }) {
-  // Only auto-expand if there's a result to show
-  const hasResult = Boolean(result?.value);
+  const hasDetails = Boolean(model?.trim() || effort?.trim() || prompt?.trim());
+  const hasContent =
+    result?.value != null || Boolean(fallbackContent.trim()) || hasDetails;
   const [expanded, toggle] = usePersistedExpanded(
     `subagent:${expansionKey}`,
     false
@@ -1004,9 +1017,11 @@ function SubagentEntry({
     <ChatSubagentEntry
       description={description}
       subagentType={subagentType}
+      details={{ model, effort, prompt }}
       result={result}
+      fallbackContent={fallbackContent}
       expanded={expanded}
-      onToggle={hasResult ? toggle : undefined}
+      onToggle={hasContent ? toggle : undefined}
       status={status}
       workspaceId={workspaceId}
       renderMarkdown={({ content, workspaceId }) => (

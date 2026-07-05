@@ -11,7 +11,10 @@ use tower_http::validate_request::ValidateRequestHeaderLayer;
 use utils::assets::asset_dir;
 
 use crate::{
-    DeploymentImpl, middleware::origin::validate_origin, routes, runtime::relay_registration,
+    DeploymentImpl,
+    middleware::origin::validate_origin,
+    routes,
+    runtime::{relay_registration, web_push},
 };
 
 /// A running server instance. Callers can read the port, then call `serve()`
@@ -51,7 +54,11 @@ impl ServerHandle {
             .expect("client preview proxy port already set");
         relay_registration::spawn_relay(&self.deployment).await;
 
-        let app_router = routes::router(self.deployment.clone());
+        let vapid_keys = web_push::load_or_create_vapid_keys()?;
+        web_push::validate_vapid_keys(&vapid_keys)?;
+        web_push::spawn_workspace_attention_monitor(self.deployment.clone(), vapid_keys.clone());
+
+        let app_router = routes::router(self.deployment.clone(), vapid_keys);
         let proxy_router: axum::Router = routes::preview::subdomain_router(self.deployment.clone())
             .layer(ValidateRequestHeaderLayer::custom(validate_origin));
 

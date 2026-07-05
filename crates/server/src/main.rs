@@ -2,7 +2,10 @@ use anyhow::{self, Error as AnyhowError};
 use axum::Router;
 use deployment::{Deployment, DeploymentError};
 use server::{
-    DeploymentImpl, middleware::origin::validate_origin, routes, runtime::relay_registration,
+    DeploymentImpl,
+    middleware::origin::validate_origin,
+    routes,
+    runtime::{relay_registration, web_push},
 };
 use services::services::container::ContainerService;
 use sqlx::Error as SqlxError;
@@ -70,6 +73,8 @@ async fn main() -> Result<(), VibeKanbanError> {
     let shutdown_token = CancellationToken::new();
 
     let deployment = DeploymentImpl::new(shutdown_token.clone()).await?;
+    let vapid_keys = web_push::load_or_create_vapid_keys()?;
+    web_push::validate_vapid_keys(&vapid_keys)?;
     deployment.update_sentry_scope().await?;
     deployment
         .container()
@@ -139,7 +144,9 @@ async fn main() -> Result<(), VibeKanbanError> {
         .set_preview_proxy_port(actual_proxy_port)
         .expect("client preview proxy port already set");
 
-    let app_router = routes::router(deployment.clone());
+    web_push::spawn_workspace_attention_monitor(deployment.clone(), vapid_keys.clone());
+
+    let app_router = routes::router(deployment.clone(), vapid_keys);
 
     // Production only: open browser
     if !cfg!(debug_assertions) {

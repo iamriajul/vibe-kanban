@@ -11,6 +11,7 @@ import { RemoteActionsProvider } from "@remote/app/providers/RemoteActionsProvid
 import { RemoteUserSystemProvider } from "@remote/app/providers/RemoteUserSystemProvider";
 import { RemoteAppShell } from "@remote/app/layout/RemoteAppShell";
 import { UserProvider } from "@/shared/providers/remote/UserProvider";
+import { AppBrowserNotifications } from "@/shared/notifications/AppBrowserNotifications";
 import { WorkspaceProvider } from "@/shared/providers/WorkspaceProvider";
 import { ExecutionProcessesProvider } from "@/shared/providers/ExecutionProcessesProvider";
 import { TerminalProvider } from "@/shared/providers/TerminalProvider";
@@ -162,8 +163,11 @@ function RootLayout() {
   return (
     <AppNavigationProvider value={appNavigation}>
       <UserProvider>
+        <AppBrowserNotifications />
         <RemoteActionsProvider>
-          <RemoteUserSystemProvider>{content}</RemoteUserSystemProvider>
+          <RemoteUserSystemProvider>
+            {content}
+          </RemoteUserSystemProvider>
         </RemoteActionsProvider>
       </UserProvider>
     </AppNavigationProvider>

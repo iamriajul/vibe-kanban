@@ -25,6 +25,10 @@ export function getAgentName(
       return 'Cursor';
     case BaseCodingAgent.QWEN_CODE:
       return 'Qwen';
+    case BaseCodingAgent.KIMI_CODE:
+      return 'Kimi';
+    case BaseCodingAgent.ANTIGRAVITY:
+      return 'Antigravity';
     case BaseCodingAgent.COPILOT:
       return 'Copilot';
     case BaseCodingAgent.DROID:
@@ -66,6 +70,12 @@ export function AgentIcon({ agent, className = 'h-4 w-4' }: AgentIconProps) {
       break;
     case BaseCodingAgent.QWEN_CODE:
       iconPath = `/agents/qwen${suffix}.svg`;
+      break;
+    case BaseCodingAgent.KIMI_CODE:
+      iconPath = `/agents/kimi${suffix}.svg`;
+      break;
+    case BaseCodingAgent.ANTIGRAVITY:
+      iconPath = `/agents/antigravity${suffix}.svg`;
       break;
     case BaseCodingAgent.COPILOT:
       iconPath = `/agents/copilot${suffix}.svg`;

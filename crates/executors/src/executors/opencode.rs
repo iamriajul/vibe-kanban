@@ -8,7 +8,7 @@ use futures::StreamExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use tokio::{io::AsyncBufReadExt, process::Command};
+use tokio::{io::AsyncBufReadExt, process::Command, sync::mpsc};
 use ts_rs::TS;
 use workspace_utils::{command_ext::GroupSpawnNoWindowExt, msg_store::MsgStore};
 
@@ -89,7 +89,7 @@ type ServerPassword = String;
 
 impl Opencode {
     fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
-        let builder = CommandBuilder::new("npx -y opencode-ai@1.4.7")
+        let builder = CommandBuilder::new("npx -y opencode-ai@1.15.10")
             // Pass hostname/port as separate args so OpenCode treats them as explicitly set
             // (it checks `process.argv.includes(\"--port\")` / `\"--hostname\"`).
             .extend_params(["serve", "--hostname", "127.0.0.1", "--port", "0"]);
@@ -179,6 +179,12 @@ impl Opencode {
 
         let (exit_signal_tx, exit_signal_rx) = tokio::sync::oneshot::channel();
         let cancel = tokio_util::sync::CancellationToken::new();
+        let (steering_tx, steering_rx) = if slash_command.is_none() {
+            let (tx, rx) = mpsc::channel::<String>(16);
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
 
         // Prepare config values that will be moved into the spawned task
         let directory = current_dir.to_string_lossy().to_string();
@@ -223,6 +229,7 @@ impl Opencode {
                 commit_reminder,
                 commit_reminder_prompt,
                 repo_context,
+                steering_rx,
             };
 
             let result = match slash_command {
@@ -247,6 +254,7 @@ impl Opencode {
             child,
             exit_signal: Some(exit_signal_rx),
             cancel: Some(cancel),
+            steering: steering_tx,
         })
     }
 

@@ -71,6 +71,26 @@ pub struct Config {
 }
 
 impl Config {
+    pub fn with_environment_overrides(mut self) -> Self {
+        self = self.with_environment_values(
+            std::env::var("VIBE_KANBAN_BYPASS_ONBOARDING")
+                .ok()
+                .as_deref(),
+        );
+        self.editor = self.editor.with_environment_overrides();
+        self
+    }
+
+    fn with_environment_values(mut self, bypass_onboarding: Option<&str>) -> Self {
+        if env_flag_enabled(bypass_onboarding) {
+            self.disclaimer_acknowledged = true;
+            self.onboarding_acknowledged = true;
+            self.remote_onboarding_acknowledged = true;
+        }
+
+        self
+    }
+
     fn from_v7_config(old_config: v7::Config) -> Self {
         // Convert Option<bool> to bool: None or Some(true) become true, Some(false) stays false
         let analytics_enabled = old_config.analytics_enabled.unwrap_or(true);
@@ -106,6 +126,13 @@ impl Config {
         let old_config = v7::Config::from(raw_config.to_string());
         Ok(Self::from_v7_config(old_config))
     }
+}
+
+fn env_flag_enabled(value: Option<&str>) -> bool {
+    value
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
 }
 
 impl From<String> for Config {
@@ -156,5 +183,28 @@ impl Default for Config {
             relay_enabled: true,
             host_nickname: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+
+    #[test]
+    fn environment_bypass_acknowledges_onboarding() {
+        let config = Config::default().with_environment_values(Some("true"));
+
+        assert!(config.disclaimer_acknowledged);
+        assert!(config.onboarding_acknowledged);
+        assert!(config.remote_onboarding_acknowledged);
+    }
+
+    #[test]
+    fn environment_bypass_ignores_falsey_values() {
+        let config = Config::default().with_environment_values(Some("false"));
+
+        assert!(!config.disclaimer_acknowledged);
+        assert!(!config.onboarding_acknowledged);
+        assert!(!config.remote_onboarding_acknowledged);
     }
 }

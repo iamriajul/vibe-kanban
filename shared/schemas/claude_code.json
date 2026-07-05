@@ -17,6 +17,14 @@
         "null"
       ]
     },
+    "cladup": {
+      "title": "Use Cladup",
+      "description": "Run Claude through the Cladup shim instead of invoking Claude Code print mode directly",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "plan": {
       "type": [
         "boolean",

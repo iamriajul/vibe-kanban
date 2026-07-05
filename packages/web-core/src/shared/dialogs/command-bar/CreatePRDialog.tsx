@@ -248,7 +248,9 @@ const CreatePRDialogImpl = create<CreatePRDialogProps>(
                 ? 'GitHub'
                 : result.error.provider === 'azure_dev_ops'
                   ? 'Azure DevOps'
-                  : 'Git host';
+                  : result.error.provider === 'git_lab'
+                    ? 'GitLab'
+                    : 'Git host';
             const action =
               result.error.type === 'cli_not_installed'
                 ? 'not installed'

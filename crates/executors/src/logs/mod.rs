@@ -201,6 +201,12 @@ pub enum ActionType {
         #[serde(default)]
         subagent_type: Option<String>,
         #[serde(default)]
+        prompt: Option<String>,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default)]
+        effort: Option<String>,
+        #[serde(default)]
         result: Option<ToolResult>,
     },
     PlanPresentation {

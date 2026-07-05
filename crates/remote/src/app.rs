@@ -10,7 +10,7 @@ use crate::{
     attachments::cleanup::spawn_cleanup_task,
     auth::{
         GitHubOAuthProvider, GoogleOAuthProvider, JwtService, OAuthHandoffService,
-        OAuthTokenValidator, ProviderRegistry,
+        OAuthTokenValidator, ProviderRegistry, ZohoOAuthProvider,
     },
     azure_blob::AzureBlobService,
     billing::BillingService,
@@ -73,17 +73,33 @@ impl Server {
             )?);
         }
 
+        if let Some(zoho) = auth_config.zoho() {
+            registry.register(ZohoOAuthProvider::new(
+                zoho.client_id().to_string(),
+                zoho.client_secret().clone(),
+                zoho.accounts_url().map(String::from),
+            )?);
+        }
+
         if registry.is_empty() && auth_config.local().is_none() {
             bail!("no OAuth providers configured");
         }
 
         let registry = Arc::new(registry);
 
+        if !auth_config.allowed_email_domains().is_empty() {
+            tracing::info!(
+                domains = ?auth_config.allowed_email_domains(),
+                "OAuth email domain restriction enabled"
+            );
+        }
+
         let handoff_service = Arc::new(OAuthHandoffService::new(
             pool.clone(),
             registry.clone(),
             jwt.clone(),
             auth_config.public_base_url().to_string(),
+            auth_config.allowed_email_domains().to_vec(),
         ));
 
         let oauth_token_validator = Arc::new(OAuthTokenValidator::new(
@@ -120,7 +136,7 @@ impl Server {
             tracing::info!("R2 storage service initialized");
         } else {
             tracing::warn!(
-                "R2 storage service not configured. Set R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_REVIEW_ENDPOINT, and R2_REVIEW_BUCKET to enable."
+                "R2 storage service not configured. Set R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_REVIEW_ENDPOINT, and R2_REVIEW_BUCKET to enable review uploads and issue attachments."
             );
         }
 
@@ -129,7 +145,7 @@ impl Server {
             tracing::info!("Azure Blob storage service initialized");
         } else {
             tracing::info!(
-                "Azure Blob storage not configured. Set AZURE_STORAGE_ACCOUNT_NAME and AZURE_STORAGE_ACCOUNT_KEY to enable issue attachments."
+                "Azure Blob storage not configured. Azure Blob attachment storage is deprecated in this downstream build."
             );
         }
 
@@ -181,8 +197,8 @@ impl Server {
             }
         };
 
-        if let Some(ref azure_blob_service) = azure_blob {
-            spawn_cleanup_task(pool.clone(), azure_blob_service.clone());
+        if let Some(ref r2_service) = r2 {
+            spawn_cleanup_task(pool.clone(), r2_service.clone());
         }
 
         let digest_enabled = std::env::var("DIGEST_ENABLED")

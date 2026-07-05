@@ -310,6 +310,11 @@ fn remote_client_error(err: &RemoteClientError) -> ErrorInfo {
         RemoteClientError::Url(_) => {
             ErrorInfo::bad_request("RemoteClientError", "Remote service URL is invalid.")
         }
+        RemoteClientError::TokenRefreshTimeout => ErrorInfo::with_status(
+            StatusCode::GATEWAY_TIMEOUT,
+            "RemoteClientError",
+            "Token refresh timed out. Please sign in again.",
+        ),
     }
 }
 

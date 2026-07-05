@@ -4,8 +4,9 @@ pub mod normalize_logs;
 pub mod review;
 pub mod slash_commands;
 use std::{
-    collections::HashMap,
-    env,
+    collections::{HashMap, hash_map::DefaultHasher},
+    env, fs,
+    hash::{Hash, Hasher},
     path::{Path, PathBuf},
     str::FromStr,
     sync::Arc,
@@ -22,6 +23,17 @@ pub fn codex_home() -> Option<PathBuf> {
         return Some(PathBuf::from(codex_home));
     }
     dirs::home_dir().map(|home| home.join(".codex"))
+}
+
+const CODEX_NPX_CACHE_VERSION: &str = "codex-0.133.0";
+
+fn codex_npx_cache_dir(current_dir: &Path) -> PathBuf {
+    let mut hasher = DefaultHasher::new();
+    current_dir.hash(&mut hasher);
+    env::temp_dir()
+        .join("vibe-kanban-npx")
+        .join(CODEX_NPX_CACHE_VERSION)
+        .join(format!("{:016x}", hasher.finish()))
 }
 
 pub(crate) fn resolve_model(model: Option<&str>) -> (Option<&str>, bool) {
@@ -58,7 +70,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use strum_macros::{AsRefStr, EnumString};
-use tokio::process::Command;
+use tokio::{process::Command, sync::mpsc};
 use ts_rs::TS;
 use workspace_utils::{command_ext::GroupSpawnNoWindowExt, msg_store::MsgStore};
 
@@ -397,6 +409,10 @@ impl StandardCodingAgentExecutor for Codex {
                     ),
                 },
                 SlashCommandDescription {
+                    name: "goal".to_string(),
+                    description: Some("manage a long-running Codex goal".to_string()),
+                },
+                SlashCommandDescription {
                     name: "status".to_string(),
                     description: Some(
                         "show current session configuration and token usage".to_string(),
@@ -445,7 +461,7 @@ impl StandardCodingAgentExecutor for Codex {
 
 impl Codex {
     pub fn base_command() -> &'static str {
-        "npx -y @openai/codex@0.124.0"
+        "npx -y @openai/codex@0.133.0"
     }
 
     fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
@@ -509,7 +525,7 @@ impl Codex {
 
         let (model, is_fast) = resolve_model(self.model.as_deref());
         let service_tier = if is_fast {
-            Some(Some(ServiceTier::Fast))
+            Some(Some(ServiceTier::Fast.request_value().to_string()))
         } else {
             None
         };
@@ -667,6 +683,14 @@ impl Codex {
             .with_profile(&self.cmd)
             .apply_to_command(&mut process);
 
+        if self.cmd.base_command_override.is_none() {
+            let npx_cache_dir = codex_npx_cache_dir(current_dir);
+            fs::create_dir_all(&npx_cache_dir).map_err(ExecutorError::Io)?;
+            process
+                .env("npm_config_cache", &npx_cache_dir)
+                .env("NPM_CONFIG_CACHE", &npx_cache_dir);
+        }
+
         let mut child = process.group_spawn_no_window()?;
 
         let child_stdout = child.inner().stdout.take().ok_or_else(|| {
@@ -691,6 +715,8 @@ impl Codex {
         let commit_reminder_prompt = env.commit_reminder_prompt.clone();
         let cancel_for_task = cancel.clone();
 
+        let (steering_tx, mut steering_rx) = mpsc::channel::<String>(16);
+
         tokio::spawn(async move {
             let exit_signal_tx = ExitSignalSender::new(exit_signal_tx);
             let log_writer = LogWriter::new(new_stdout);
@@ -706,6 +732,7 @@ impl Codex {
                 commit_reminder_prompt,
                 cancel_for_task.clone(),
             );
+            let steering_cancel = cancel_for_task.clone();
             let rpc_peer = JsonRpcPeer::spawn(
                 child_stdin,
                 child_stdout,
@@ -717,6 +744,20 @@ impl Codex {
 
             let result = async {
                 client.initialize().await?;
+                let steering_client = client.clone();
+                tokio::spawn(async move {
+                    loop {
+                        tokio::select! {
+                            _ = steering_cancel.cancelled() => break,
+                            Some(message) = steering_rx.recv() => {
+                                if let Err(err) = steering_client.steer(message).await {
+                                    tracing::warn!("failed to steer Codex process: {err}");
+                                }
+                            }
+                            else => break,
+                        }
+                    }
+                });
                 task(client, exit_signal_tx.clone()).await
             }
             .await;
@@ -757,13 +798,16 @@ impl Codex {
             child,
             exit_signal: Some(exit_signal_rx),
             cancel: Some(cancel),
+            steering: Some(steering_tx),
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_model;
+    use std::path::Path;
+
+    use super::{CODEX_NPX_CACHE_VERSION, codex_npx_cache_dir, resolve_model};
 
     #[test]
     fn resolve_model_detects_fast_suffix() {
@@ -779,5 +823,15 @@ mod tests {
             (Some("gpt-5.4-mini"), false)
         );
         assert_eq!(resolve_model(None), (None, false));
+    }
+
+    #[test]
+    fn codex_npx_cache_is_scoped_by_working_directory() {
+        let first = codex_npx_cache_dir(Path::new("/workspaces/first"));
+        let second = codex_npx_cache_dir(Path::new("/workspaces/second"));
+
+        assert_ne!(first, second);
+        assert!(first.starts_with(std::env::temp_dir().join("vibe-kanban-npx")));
+        assert!(first.to_string_lossy().contains(CODEX_NPX_CACHE_VERSION));
     }
 }

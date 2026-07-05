@@ -42,6 +42,20 @@
         }
       }
     },
+    "KIMI_CODE": {
+      "DEFAULT": {
+        "KIMI_CODE": {
+          "yolo": true
+        }
+      }
+    },
+    "ANTIGRAVITY": {
+      "DEFAULT": {
+        "ANTIGRAVITY": {
+          "dangerously_skip_permissions": true
+        }
+      }
+    },
     "CURSOR_AGENT": {
       "DEFAULT": {
         "CURSOR_AGENT": {

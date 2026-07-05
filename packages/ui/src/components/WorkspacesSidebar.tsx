@@ -12,6 +12,7 @@ import { cn } from '../lib/cn';
 import { InputField } from './InputField';
 import { WorkspaceSummary } from './WorkspaceSummary';
 import type { AppBarHostStatus } from './AppBar';
+import type { UserAvatarUser } from './UserAvatar';
 import {
   CollapsibleSectionHeader,
   type SectionAction,
@@ -33,6 +34,7 @@ export interface WorkspacesSidebarWorkspace {
   latestProcessCompletedAt?: string;
   latestProcessStatus?: 'running' | 'completed' | 'failed' | 'killed';
   prStatus?: 'open' | 'merged' | 'closed' | 'unknown';
+  owner?: UserAvatarUser | null;
 }
 
 export interface WorkspacesSidebarPersistKeys {
@@ -158,6 +160,7 @@ function WorkspaceList({
           latestProcessCompletedAt={workspace.latestProcessCompletedAt}
           latestProcessStatus={workspace.latestProcessStatus}
           prStatus={workspace.prStatus}
+          owner={workspace.owner}
           onOpenWorkspaceActions={onOpenWorkspaceActions}
           onClick={() => onSelectWorkspace(workspace.id)}
         />
@@ -351,6 +354,7 @@ export function WorkspacesSidebar({
                   latestProcessCompletedAt={workspace.latestProcessCompletedAt}
                   latestProcessStatus={workspace.latestProcessStatus}
                   prStatus={workspace.prStatus}
+                  owner={workspace.owner}
                   onOpenWorkspaceActions={handleOpenWorkspaceActions}
                   onClick={() => onSelectWorkspace(workspace.id)}
                 />
@@ -468,6 +472,7 @@ export function WorkspacesSidebar({
                 latestProcessCompletedAt={workspace.latestProcessCompletedAt}
                 latestProcessStatus={workspace.latestProcessStatus}
                 prStatus={workspace.prStatus}
+                owner={workspace.owner}
                 onOpenWorkspaceActions={handleOpenWorkspaceActions}
                 onClick={() => onSelectWorkspace(workspace.id)}
               />

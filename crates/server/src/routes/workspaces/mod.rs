@@ -13,13 +13,34 @@ pub mod repos;
 pub mod streams;
 pub mod workspace_summary;
 
+use api_types::LoginStatus;
 use axum::{
     Router,
-    middleware::from_fn_with_state,
+    body::Body,
+    extract::State,
+    http::Request,
+    middleware::{Next, from_fn_with_state},
+    response::Response,
     routing::{get, post},
 };
+use deployment::Deployment;
 
-use crate::{DeploymentImpl, middleware::load_workspace_middleware};
+use crate::{DeploymentImpl, error::ApiError, middleware::load_workspace_middleware};
+
+async fn require_workspace_auth_if_shared(
+    State(deployment): State<DeploymentImpl>,
+    request: Request<Body>,
+    next: Next,
+) -> Result<Response, ApiError> {
+    if deployment.remote_info().get_api_base().is_none() {
+        return Ok(next.run(request).await);
+    }
+
+    match deployment.get_login_status().await {
+        LoginStatus::LoggedIn { .. } => Ok(next.run(request).await),
+        LoginStatus::LoggedOut => Err(ApiError::Unauthorized),
+    }
+}
 
 pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
     let workspace_id_router = Router::new()
@@ -55,7 +76,11 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
         )
         .nest("/{id}", workspace_id_router)
         .nest("/{id}/attachments", attachments::router(deployment))
-        .nest("/{id}/links", links::router(deployment));
+        .nest("/{id}/links", links::router(deployment))
+        .layer(from_fn_with_state(
+            deployment.clone(),
+            require_workspace_auth_if_shared,
+        ));
 
     Router::new().nest("/workspaces", workspaces_router)
 }

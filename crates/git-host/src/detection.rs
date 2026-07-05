@@ -33,6 +33,11 @@ pub(crate) fn detect_provider_from_url(url: &str) -> ProviderKind {
         return ProviderKind::GitHub;
     }
 
+    // GitLab.com or self-hosted GitLab (e.g., gitlab.company.com)
+    if url_lower.contains("gitlab.") || url_lower.contains("gitlab.com") {
+        return ProviderKind::GitLab;
+    }
+
     ProviderKind::Unknown
 }
 
@@ -42,6 +47,7 @@ pub(crate) fn detect_provider_from_url(url: &str) -> ProviderKind {
 /// - GitHub: `https://github.com/owner/repo/pull/123`
 /// - GitHub Enterprise: `https://github.company.com/owner/repo/pull/123`
 /// - Azure DevOps: `https://dev.azure.com/org/project/_git/repo/pullrequest/123`
+/// - GitLab: `https://gitlab.com/owner/repo/-/merge_requests/123`
 #[cfg(test)]
 fn detect_provider_from_pr_url(pr_url: &str) -> ProviderKind {
     let url_lower = pr_url.to_lowercase();
@@ -57,6 +63,11 @@ fn detect_provider_from_pr_url(pr_url: &str) -> ProviderKind {
     // Azure DevOps pattern: contains /pullrequest/ in the path
     if url_lower.contains("/pullrequest/") {
         return ProviderKind::AzureDevOps;
+    }
+
+    // GitLab pattern: contains /-/merge_requests/ in the path
+    if url_lower.contains("/-/merge_requests/") {
+        return ProviderKind::GitLab;
     }
 
     // Fall back to general URL detection
@@ -137,11 +148,39 @@ mod tests {
     }
 
     #[test]
-    fn test_unknown_provider() {
+    fn test_gitlab_com() {
         assert_eq!(
             detect_provider_from_url("https://gitlab.com/owner/repo"),
-            ProviderKind::Unknown
+            ProviderKind::GitLab
         );
+        assert_eq!(
+            detect_provider_from_url("https://gitlab.com/owner/repo.git"),
+            ProviderKind::GitLab
+        );
+        assert_eq!(
+            detect_provider_from_url("git@gitlab.com:owner/repo.git"),
+            ProviderKind::GitLab
+        );
+    }
+
+    #[test]
+    fn test_gitlab_self_hosted() {
+        assert_eq!(
+            detect_provider_from_url("https://gitlab.company.com/owner/repo"),
+            ProviderKind::GitLab
+        );
+        assert_eq!(
+            detect_provider_from_url("https://gitlab.example.com/team/project"),
+            ProviderKind::GitLab
+        );
+        assert_eq!(
+            detect_provider_from_url("git@gitlab.internal.io:org/repo.git"),
+            ProviderKind::GitLab
+        );
+    }
+
+    #[test]
+    fn test_unknown_provider() {
         assert_eq!(
             detect_provider_from_url("https://bitbucket.org/owner/repo"),
             ProviderKind::Unknown
@@ -157,6 +196,20 @@ mod tests {
         assert_eq!(
             detect_provider_from_pr_url("https://github.company.com/owner/repo/pull/456"),
             ProviderKind::GitHub
+        );
+    }
+
+    #[test]
+    fn test_pr_url_gitlab() {
+        assert_eq!(
+            detect_provider_from_pr_url("https://gitlab.com/owner/repo/-/merge_requests/123"),
+            ProviderKind::GitLab
+        );
+        assert_eq!(
+            detect_provider_from_pr_url(
+                "https://gitlab.example.com/team/project/-/merge_requests/456"
+            ),
+            ProviderKind::GitLab
         );
     }
 

@@ -3,7 +3,7 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-use api_types::LoginStatus;
+use api_types::{LoginStatus, ProfileResponse};
 use async_trait::async_trait;
 use client_info::ClientInfo;
 use db::DBService;
@@ -25,7 +25,6 @@ use services::services::{
     file::FileService,
     file_search::FileSearchCache,
     filesystem::FilesystemService,
-    oauth_credentials::OAuthCredentials,
     pr_monitor::PrMonitorService,
     queued_message::QueuedMessageService,
     remote_client::{RemoteClient, RemoteClientError},
@@ -85,6 +84,7 @@ pub struct LocalDeployment {
 struct PendingHandoff {
     provider: String,
     app_verifier: String,
+    auth_session_id: Option<String>,
 }
 
 #[async_trait]
@@ -160,13 +160,7 @@ impl Deployment for LocalDeployment {
         let approvals = Approvals::new();
         let queued_message_service = QueuedMessageService::new();
 
-        let oauth_credentials = Arc::new(OAuthCredentials::new(credentials_path()));
-        if let Err(e) = oauth_credentials.load().await {
-            tracing::warn!(?e, "failed to load OAuth credentials");
-        }
-
-        let profile_cache = Arc::new(RwLock::new(None));
-        let auth_context = AuthContext::new(oauth_credentials.clone(), profile_cache.clone());
+        let auth_context = AuthContext::new(credentials_path());
 
         let api_base = std::env::var("VK_SHARED_API_BASE")
             .ok()
@@ -230,6 +224,7 @@ impl Deployment for LocalDeployment {
             analytics_ctx,
             approvals.clone(),
             queued_message_service.clone(),
+            auth_context.clone(),
             remote_client.clone().ok(),
         )
         .await;
@@ -399,7 +394,10 @@ impl LocalDeployment {
     }
 
     pub fn remote_client(&self) -> Result<RemoteClient, RemoteClientNotConfigured> {
-        self.remote_client.clone()
+        let auth_session_id = self.auth_context.current_session_id();
+        self.remote_client
+            .clone()
+            .map(|client| client.with_session_id(auth_session_id))
     }
 
     pub async fn get_login_status(&self) -> LoginStatus {
@@ -457,21 +455,78 @@ impl LocalDeployment {
         provider: String,
         app_verifier: String,
     ) {
+        let auth_session_id = self.auth_context.current_session_id();
         self.oauth_handoffs.write().await.insert(
             handoff_id,
             PendingHandoff {
                 provider,
                 app_verifier,
+                auth_session_id,
             },
         );
     }
 
     pub async fn take_oauth_handoff(&self, handoff_id: &Uuid) -> Option<(String, String)> {
-        self.oauth_handoffs
-            .write()
-            .await
+        let auth_session_id = self.auth_context.current_session_id();
+        let mut handoffs = self.oauth_handoffs.write().await;
+        let should_take = handoffs
+            .get(handoff_id)
+            .map(|handoff| handoff.auth_session_id == auth_session_id)
+            .unwrap_or(false);
+
+        if !should_take {
+            return None;
+        }
+
+        handoffs
             .remove(handoff_id)
             .map(|state| (state.provider, state.app_verifier))
+    }
+
+    pub async fn current_git_identity(&self) -> Option<(String, String)> {
+        match self.get_login_status().await {
+            LoginStatus::LoggedIn { profile } => {
+                profile.as_ref().and_then(|p| Self::git_identity_from_profile(p))
+            }
+            LoginStatus::LoggedOut => None,
+        }
+    }
+
+    pub(crate) fn git_identity_from_profile(
+        profile: &ProfileResponse,
+    ) -> Option<(String, String)> {
+        let email = profile.email.trim().to_string();
+        if email.is_empty() {
+            return None;
+        }
+
+        let name = profile
+            .providers
+            .iter()
+            .find_map(|provider| {
+                provider
+                    .display_name
+                    .as_ref()
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+            })
+            .or_else(|| {
+                profile
+                    .username
+                    .as_ref()
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+            })
+            .or_else(|| {
+                email
+                    .split('@')
+                    .next()
+                    .map(str::trim)
+                    .map(str::to_string)
+                    .filter(|value| !value.is_empty())
+            })?;
+
+        Some((name, email))
     }
 
     pub fn pty(&self) -> &PtyService {

@@ -103,6 +103,7 @@ pub struct OAuthHandoffService {
     providers: Arc<ProviderRegistry>,
     jwt: Arc<JwtService>,
     public_origin: String,
+    allowed_email_domains: Vec<String>,
 }
 
 impl OAuthHandoffService {
@@ -111,6 +112,7 @@ impl OAuthHandoffService {
         providers: Arc<ProviderRegistry>,
         jwt: Arc<JwtService>,
         public_origin: String,
+        allowed_email_domains: Vec<String>,
     ) -> Self {
         let trimmed_origin = public_origin.trim_end_matches('/').to_string();
         Self {
@@ -118,6 +120,7 @@ impl OAuthHandoffService {
             providers,
             jwt,
             public_origin: trimmed_origin,
+            allowed_email_domains,
         }
     }
 
@@ -284,6 +287,26 @@ impl OAuthHandoffService {
             .map_err(|e| HandoffError::Failed(format!("Failed to encrypt provider token: {e}")))?;
 
         let user_profile = self.fetch_user_with_retries(&provider, &grant).await?;
+
+        // Enforce allowed email domains if configured
+        if !self.allowed_email_domains.is_empty() {
+            let email = user_profile.email.as_deref().unwrap_or("");
+            let domain = email.rsplit_once('@').map(|(_, d)| d.to_lowercase());
+            let allowed = domain
+                .as_ref()
+                .map(|d| self.allowed_email_domains.iter().any(|ad| ad.eq_ignore_ascii_case(d)))
+                .unwrap_or(false);
+            if !allowed {
+                let allowed_list = self.allowed_email_domains.join(", ");
+                repo.set_status(record.id, AuthorizationStatus::Error, Some("email_domain_not_allowed"))
+                    .await?;
+                return Ok(CallbackResult::Error {
+                    handoff_id: Some(record.id),
+                    return_to: Some(record.return_to.clone()),
+                    error: format!("Your email domain is not allowed. Permitted domains: {allowed_list}"),
+                });
+            }
+        }
 
         let user = self
             .upsert_identity(&provider, &user_profile, Some(encrypted_tokens.as_str()))

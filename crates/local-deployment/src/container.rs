@@ -33,8 +33,16 @@ use executors::{
     },
     approvals::{ExecutorApprovalService, NoopExecutorApprovalService},
     env::{ExecutionEnv, RepoContext},
-    executors::{BaseCodingAgent, CancellationToken, ExecutorExitResult, ExecutorExitSignal},
-    logs::{NormalizedEntryType, utils::patch::extract_normalized_entry_from_patch},
+    executors::{
+        BaseCodingAgent, CancellationToken, ExecutorExitResult, ExecutorExitSignal, SteeringSender,
+    },
+    logs::{
+        NormalizedEntry, NormalizedEntryType,
+        utils::{
+            EntryIndexProvider,
+            patch::{ConversationPatch, extract_normalized_entry_from_patch},
+        },
+    },
 };
 use futures::{FutureExt, TryStreamExt, stream::select};
 use git::GitService;
@@ -42,6 +50,7 @@ use serde_json::json;
 use services::services::{
     analytics::AnalyticsContext,
     approvals::{Approvals, executor_approvals::ExecutorApprovalBridge},
+    auth::AuthContext,
     config::{Config, DEFAULT_COMMIT_REMINDER_PROMPT},
     container::{ContainerError, ContainerRef, ContainerService},
     diff_stream::{self, DiffStreamHandle},
@@ -61,7 +70,7 @@ use utils::{
 use uuid::Uuid;
 use workspace_manager::{RepoWorkspaceInput, WorkspaceError, WorkspaceManager};
 
-use crate::{command, copy};
+use crate::{LocalDeployment, command, copy};
 
 const WORKSPACE_TOUCH_DEBOUNCE: Duration = Duration::from_mins(2);
 
@@ -70,6 +79,7 @@ pub struct LocalContainerService {
     db: DBService,
     workspace_manager: WorkspaceManager,
     child_store: Arc<RwLock<HashMap<Uuid, Arc<RwLock<AsyncGroupChild>>>>>,
+    steering_senders: Arc<RwLock<HashMap<Uuid, SteeringSender>>>,
     cancellation_tokens: Arc<RwLock<HashMap<Uuid, CancellationToken>>>,
     msg_stores: Arc<RwLock<HashMap<Uuid, Arc<MsgStore>>>>,
     /// Tracks background tasks that stream logs to the database.
@@ -84,7 +94,9 @@ pub struct LocalContainerService {
     approvals: Approvals,
     queued_message_service: QueuedMessageService,
     notification_service: NotificationService,
+    auth_context: AuthContext,
     remote_client: Option<RemoteClient>,
+    execution_auth_sessions: Arc<RwLock<HashMap<Uuid, Option<String>>>>,
 }
 
 impl LocalContainerService {
@@ -99,19 +111,23 @@ impl LocalContainerService {
         analytics: Option<AnalyticsContext>,
         approvals: Approvals,
         queued_message_service: QueuedMessageService,
+        auth_context: AuthContext,
         remote_client: Option<RemoteClient>,
     ) -> Self {
         let child_store = Arc::new(RwLock::new(HashMap::new()));
+        let steering_senders = Arc::new(RwLock::new(HashMap::new()));
         let cancellation_tokens = Arc::new(RwLock::new(HashMap::new()));
         let db_stream_handles = Arc::new(RwLock::new(HashMap::new()));
         let exit_monitor_handles = Arc::new(RwLock::new(HashMap::new()));
         let workspace_touch_times = Arc::new(RwLock::new(HashMap::new()));
+        let execution_auth_sessions = Arc::new(RwLock::new(HashMap::new()));
         let notification_service = NotificationService::new(config.clone());
 
         let container = LocalContainerService {
             db,
             workspace_manager,
             child_store,
+            steering_senders,
             cancellation_tokens,
             msg_stores,
             db_stream_handles,
@@ -124,7 +140,9 @@ impl LocalContainerService {
             approvals,
             queued_message_service,
             notification_service,
+            auth_context,
             remote_client,
+            execution_auth_sessions,
         };
 
         container.spawn_workspace_cleanup();
@@ -208,6 +226,21 @@ impl LocalContainerService {
         map.remove(id);
     }
 
+    async fn add_steering_sender(&self, id: Uuid, sender: SteeringSender) {
+        let mut map = self.steering_senders.write().await;
+        map.insert(id, sender);
+    }
+
+    async fn get_steering_sender(&self, id: &Uuid) -> Option<SteeringSender> {
+        let map = self.steering_senders.read().await;
+        map.get(id).cloned()
+    }
+
+    async fn remove_steering_sender(&self, id: &Uuid) {
+        let mut map = self.steering_senders.write().await;
+        map.remove(id);
+    }
+
     async fn add_cancellation_token(&self, id: Uuid, token: CancellationToken) {
         let mut map = self.cancellation_tokens.write().await;
         map.insert(id, token);
@@ -236,6 +269,73 @@ impl LocalContainerService {
     async fn take_exit_monitor_handle(&self, id: &Uuid) -> Option<JoinHandle<()>> {
         let mut map = self.exit_monitor_handles.write().await;
         map.remove(id)
+    }
+
+    async fn remember_execution_auth_session(
+        &self,
+        execution_id: Uuid,
+        auth_session_id: Option<String>,
+    ) {
+        self.execution_auth_sessions
+            .write()
+            .await
+            .insert(execution_id, auth_session_id);
+    }
+
+    async fn auth_session_for_execution(&self, execution_id: Uuid) -> Option<String> {
+        self.execution_auth_sessions
+            .read()
+            .await
+            .get(&execution_id)
+            .cloned()
+            .flatten()
+    }
+
+    async fn take_execution_auth_session(&self, execution_id: &Uuid) -> Option<String> {
+        self.execution_auth_sessions
+            .write()
+            .await
+            .remove(execution_id)
+            .flatten()
+    }
+
+    async fn remote_client_for_execution(&self, execution_id: Uuid) -> Option<RemoteClient> {
+        let auth_session_id = self.auth_session_for_execution(execution_id).await;
+        self.remote_client
+            .clone()
+            .map(|client| client.with_session_id(auth_session_id))
+    }
+
+    async fn git_identity_for_auth_session(
+        &self,
+        auth_session_id: Option<String>,
+    ) -> Option<(String, String)> {
+        let mut profile = self
+            .auth_context
+            .cached_profile_for(auth_session_id.as_deref())
+            .await;
+
+        if profile.is_none()
+            && let Some(client) = self
+                .remote_client
+                .clone()
+                .map(|client| client.with_session_id(auth_session_id.clone()))
+            && let Ok(fetched_profile) = client.profile().await
+        {
+            self.auth_context
+                .set_profile_for(auth_session_id.as_deref(), fetched_profile.clone())
+                .await;
+            profile = Some(fetched_profile);
+        }
+
+        profile
+            .as_ref()
+            .and_then(LocalDeployment::git_identity_from_profile)
+    }
+
+    async fn git_identity_for_execution(&self, execution_id: Uuid) -> Option<(String, String)> {
+        let auth_session_id = self.auth_session_for_execution(execution_id).await;
+        self.git_identity_for_auth_session(auth_session_id).await
     }
 
     async fn cleanup_workspace(&self, workspace: &Workspace) {
@@ -448,7 +548,12 @@ impl LocalContainerService {
     }
 
     /// Commit changes to each repo. Logs failures but continues with other repos.
-    fn commit_repos(&self, repos_with_changes: Vec<(Repo, PathBuf)>, message: &str) -> bool {
+    fn commit_repos(
+        &self,
+        repos_with_changes: Vec<(Repo, PathBuf)>,
+        message: &str,
+        git_identity: Option<&(String, String)>,
+    ) -> bool {
         let mut any_committed = false;
 
         for (repo, worktree_path) in repos_with_changes {
@@ -458,7 +563,13 @@ impl LocalContainerService {
                 &worktree_path
             );
 
-            match self.git().commit(&worktree_path, message) {
+            let commit_result = if let Some((name, email)) = git_identity {
+                self.git().commit_as(&worktree_path, message, name, email)
+            } else {
+                self.git().commit(&worktree_path, message)
+            };
+
+            match commit_result {
                 Ok(true) => {
                     any_committed = true;
                     tracing::info!("Committed changes in repo '{}'", repo.name);
@@ -484,6 +595,7 @@ impl LocalContainerService {
     ) -> JoinHandle<()> {
         let exec_id = *exec_id;
         let child_store = self.child_store.clone();
+        let steering_senders = self.steering_senders.clone();
         let msg_stores = self.msg_stores.clone();
         let db = self.db.clone();
         let config = self.config.clone();
@@ -594,7 +706,20 @@ impl LocalContainerService {
 
                     if should_start_next {
                         // If the process exited successfully, start the next action
-                        if let Err(e) = container.try_start_next_action(&ctx).await {
+                        let next_action_result = if let Some(auth_session_id) =
+                            container.auth_session_for_execution(exec_id).await
+                        {
+                            container
+                                .auth_context
+                                .run_with_session(auth_session_id, async {
+                                    container.try_start_next_action(&ctx).await
+                                })
+                                .await
+                        } else {
+                            container.try_start_next_action(&ctx).await
+                        };
+
+                        if let Err(e) = next_action_result {
                             tracing::error!("Failed to start next action after completion: {}", e);
                         }
                     } else {
@@ -649,10 +774,24 @@ impl LocalContainerService {
                             }
 
                             // Execute the queued follow-up
-                            if let Err(e) = container
-                                .start_queued_follow_up(&ctx, &queued_msg.data)
-                                .await
+                            let queued_follow_up_result = if let Some(auth_session_id) =
+                                container.auth_session_for_execution(exec_id).await
                             {
+                                container
+                                    .auth_context
+                                    .run_with_session(auth_session_id, async {
+                                        container
+                                            .start_queued_follow_up(&ctx, &queued_msg.data)
+                                            .await
+                                    })
+                                    .await
+                            } else {
+                                container
+                                    .start_queued_follow_up(&ctx, &queued_msg.data)
+                                    .await
+                            };
+
+                            if let Err(e) = queued_follow_up_result {
                                 tracing::error!("Failed to start queued follow-up: {}", e);
                                 // Fall back to finalization if follow-up fails
                                 container.finalize_task(&ctx).await;
@@ -758,7 +897,7 @@ impl LocalContainerService {
                 if matches!(
                     &ctx.execution_process.run_reason,
                     ExecutionProcessRunReason::CodingAgent
-                ) && let Some(client) = &container.remote_client
+                ) && let Some(client) = container.remote_client_for_execution(exec_id).await
                 {
                     let stats = diff_stream::compute_diff_stats(
                         &container.db.pool,
@@ -772,7 +911,6 @@ impl LocalContainerService {
                             .ok()
                             .flatten()
                             .and_then(|ws| ws.workspace.name);
-                    let client = client.clone();
                     let workspace_id = ctx.workspace.id;
                     let archived = ctx.workspace.archived;
                     tokio::spawn(async move {
@@ -809,6 +947,8 @@ impl LocalContainerService {
                 let _ = child.start_kill();
             }
             child_store.write().await.remove(&exec_id);
+            steering_senders.write().await.remove(&exec_id);
+            let _ = container.take_execution_auth_session(&exec_id).await;
         })
     }
 
@@ -1365,6 +1505,17 @@ impl ContainerService for LocalContainerService {
         // Always inject workspace/session context
         env.insert("VK_WORKSPACE_ID", workspace.id.to_string());
         env.insert("VK_WORKSPACE_BRANCH", &workspace.branch);
+        env.insert("VK_SESSION_ID", execution_process.session_id.to_string());
+        let auth_session_id = self.auth_context.current_session_id();
+        if let Some((name, email)) = self
+            .git_identity_for_auth_session(auth_session_id.clone())
+            .await
+        {
+            env.insert("GIT_AUTHOR_NAME", &name);
+            env.insert("GIT_AUTHOR_EMAIL", &email);
+            env.insert("GIT_COMMITTER_NAME", &name);
+            env.insert("GIT_COMMITTER_EMAIL", &email);
+        }
 
         // Create the child and stream, add to execution tracker with timeout
         let mut spawned = tokio::time::timeout(
@@ -1389,11 +1540,19 @@ impl ContainerService for LocalContainerService {
         self.add_child_to_store(execution_process.id, spawned.child)
             .await;
 
+        if let Some(steering) = spawned.steering {
+            self.add_steering_sender(execution_process.id, steering)
+                .await;
+        }
+
         // Store cancellation token for graceful shutdown
         if let Some(cancel) = spawned.cancel {
             self.add_cancellation_token(execution_process.id, cancel)
                 .await;
         }
+
+        self.remember_execution_auth_session(execution_process.id, auth_session_id)
+            .await;
 
         // Spawn unified exit monitor: watches OS exit and optional executor signal
         let hn = self.spawn_exit_monitor(&execution_process.id, spawned.exit_signal);
@@ -1455,6 +1614,7 @@ impl ContainerService for LocalContainerService {
             }
         }
         self.remove_child_from_store(&execution_process.id).await;
+        self.remove_steering_sender(&execution_process.id).await;
 
         // Mark the process finished in the MsgStore and wait for DB persistence
         let db_stream_handle = self.take_db_stream_handle(&execution_process.id).await;
@@ -1472,6 +1632,68 @@ impl ContainerService for LocalContainerService {
 
         // Record after-head commit OID (best-effort)
         self.update_after_head_commits(execution_process.id).await;
+
+        Ok(())
+    }
+
+    async fn steer_execution(
+        &self,
+        execution_process: &ExecutionProcess,
+        message: &str,
+    ) -> Result<(), ContainerError> {
+        if execution_process.status != ExecutionProcessStatus::Running {
+            return Err(ContainerError::Other(anyhow!(
+                "Execution process is not running"
+            )));
+        }
+
+        let message = message.trim();
+        if message.is_empty() {
+            return Err(ContainerError::Other(anyhow!(
+                "Steering message cannot be empty"
+            )));
+        }
+
+        let sender = self
+            .get_steering_sender(&execution_process.id)
+            .await
+            .ok_or_else(|| {
+                ContainerError::Other(anyhow!(
+                    "Agent steering is not supported for this execution process"
+                ))
+            })?;
+
+        sender
+            .send(message.to_string())
+            .await
+            .map_err(|_| ContainerError::Other(anyhow!("Agent steering channel is closed")))?;
+
+        if let Some(msg_store) = self.get_msg_store_by_id(&execution_process.id).await {
+            let entry_index = EntryIndexProvider::start_from(&msg_store).next();
+            let patch = ConversationPatch::add_normalized_entry(
+                entry_index,
+                NormalizedEntry {
+                    timestamp: None,
+                    entry_type: NormalizedEntryType::UserMessage,
+                    content: message.to_string(),
+                    metadata: None,
+                },
+            );
+            msg_store.push_patch(patch.clone());
+            if let Err(e) = services::services::execution_process::append_log_message(
+                execution_process.session_id,
+                execution_process.id,
+                &LogMsg::JsonPatch(patch),
+            )
+            .await
+            {
+                tracing::warn!(
+                    "Failed to persist steering message for execution {}: {}",
+                    execution_process.id,
+                    e
+                );
+            }
+        }
 
         Ok(())
     }
@@ -1574,7 +1796,10 @@ impl ContainerService for LocalContainerService {
             return Ok(false);
         }
 
-        Ok(self.commit_repos(repos_with_changes, &message))
+        let git_identity = self
+            .git_identity_for_execution(ctx.execution_process.id)
+            .await;
+        Ok(self.commit_repos(repos_with_changes, &message, git_identity.as_ref()))
     }
 
     /// Copy files from the original project directory to the worktree.

@@ -18,7 +18,10 @@ interface UseSessionSendOptions {
 
 interface UseSessionSendResult {
   /** Send a message. Returns true on success, false on failure. */
-  send: (message: string) => Promise<boolean>;
+  send: (
+    message: string,
+    options?: { createNewSession?: boolean; sessionName?: string }
+  ) => Promise<boolean>;
   /** Whether a send operation is in progress */
   isSending: boolean;
   /** Error message if send failed */
@@ -49,7 +52,10 @@ export function useSessionSend({
   const [error, setError] = useState<string | null>(null);
 
   const send = useCallback(
-    async (message: string): Promise<boolean> => {
+    async (
+      message: string,
+      options?: { createNewSession?: boolean; sessionName?: string }
+    ): Promise<boolean> => {
       const trimmed = message.trim();
       if (!trimmed) return false;
       if (!executorConfig) {
@@ -59,7 +65,7 @@ export function useSessionSend({
 
       setError(null);
 
-      if (isNewSessionMode) {
+      if (isNewSessionMode || options?.createNewSession) {
         // New session flow
         if (!workspaceId) {
           setError('No workspace selected');
@@ -70,6 +76,7 @@ export function useSessionSend({
             workspaceId,
             prompt: trimmed,
             executorConfig,
+            name: options?.sessionName,
           });
           onSelectSession?.(session.id);
           return true;

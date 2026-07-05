@@ -33,6 +33,7 @@ export interface SidebarWorkspace {
   prStatus?: 'open' | 'merged' | 'closed' | 'unknown';
   prNumber?: number;
   prUrl?: string;
+  ownerUserId?: string | null;
 }
 
 // Keep the old export name for backwards compatibility
@@ -44,6 +45,11 @@ export interface UseWorkspacesResult {
   isLoading: boolean;
   isConnected: boolean;
   error: string | null;
+}
+
+interface UseWorkspacesOptions {
+  enabled?: boolean;
+  hostId?: string | null;
 }
 
 // State shape from the WebSocket stream
@@ -81,6 +87,7 @@ function toSidebarWorkspace(
     prNumber:
       summary?.pr_number != null ? Number(summary.pr_number) : undefined,
     prUrl: summary?.pr_url ?? undefined,
+    ownerUserId: ws.owner_user_id,
   };
 }
 
@@ -127,8 +134,12 @@ async function fetchWorkspaceSummariesByArchived(
   }
 }
 
-export function useWorkspaces(): UseWorkspacesResult {
-  const hostId = useHostId();
+export function useWorkspaces(
+  options: UseWorkspacesOptions = {}
+): UseWorkspacesResult {
+  const enabled = options.enabled ?? true;
+  const contextHostId = useHostId();
+  const hostId = options.hostId !== undefined ? options.hostId : contextHostId;
 
   // Two separate WebSocket connections: one for active, one for archived
   // No limit param - we fetch all and slice on frontend so backfill works when archiving
@@ -146,7 +157,11 @@ export function useWorkspaces(): UseWorkspacesResult {
     isConnected: activeIsConnected,
     isInitialized: activeIsInitialized,
     error: activeError,
-  } = useJsonPatchWsStream<WorkspacesState>(activeEndpoint, true, initialData);
+  } = useJsonPatchWsStream<WorkspacesState>(
+    activeEndpoint,
+    enabled,
+    initialData
+  );
 
   const {
     data: archivedData,
@@ -155,7 +170,7 @@ export function useWorkspaces(): UseWorkspacesResult {
     error: archivedError,
   } = useJsonPatchWsStream<WorkspacesState>(
     archivedEndpoint,
-    true,
+    enabled,
     initialData
   );
 
@@ -165,7 +180,7 @@ export function useWorkspaces(): UseWorkspacesResult {
     useQuery({
       queryKey: workspaceSummaryKeys.byArchived(false, hostId),
       queryFn: () => fetchWorkspaceSummariesByArchived(false, hostId),
-      enabled: activeIsInitialized,
+      enabled: enabled && activeIsInitialized,
       staleTime: 1000,
       refetchInterval: 15000,
       refetchOnWindowFocus: false,
@@ -178,7 +193,7 @@ export function useWorkspaces(): UseWorkspacesResult {
     useQuery({
       queryKey: workspaceSummaryKeys.byArchived(true, hostId),
       queryFn: () => fetchWorkspaceSummariesByArchived(true, hostId),
-      enabled: archivedIsInitialized,
+      enabled: enabled && archivedIsInitialized,
       staleTime: 1000,
       refetchInterval: 15000,
       refetchOnWindowFocus: false,
@@ -219,13 +234,13 @@ export function useWorkspaces(): UseWorkspacesResult {
   }, [archivedData, archivedSummaries]);
 
   // isLoading is true when we haven't received initial data from either stream
-  const isLoading = !activeIsInitialized || !archivedIsInitialized;
+  const isLoading = enabled && (!activeIsInitialized || !archivedIsInitialized);
 
   // Combined connection status
-  const isConnected = activeIsConnected && archivedIsConnected;
+  const isConnected = enabled && activeIsConnected && archivedIsConnected;
 
   // Combined error (show first error if any)
-  const error = activeError || archivedError;
+  const error = enabled ? activeError || archivedError : null;
 
   return {
     workspaces,

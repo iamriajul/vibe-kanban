@@ -82,9 +82,21 @@ const isBetterPreviewUrlCandidate = (
 };
 
 const getVibeKanbanPort = (): string | null => {
-  if (typeof window !== 'undefined' && window.location.port) {
+  if (typeof window === 'undefined') return null;
+
+  // Standard case: port is explicit in the URL (e.g. localhost:13500).
+  if (window.location.port) {
     return window.location.port;
   }
+
+  // VSCODE_PROXY_URI case: the app is accessed via a subdomain whose leading
+  // label is the port number (e.g. https://13500.code.vk.community.example.com/).
+  // window.location.port is empty (HTTPS default), so extract from hostname.
+  const leadingLabel = window.location.hostname.split('.')[0];
+  if (leadingLabel && /^\d{2,5}$/.test(leadingLabel)) {
+    return leadingLabel;
+  }
+
   return null;
 };
 
@@ -148,7 +160,10 @@ const toOriginUrlInfo = (
   };
 };
 
-export const detectPreviewUrl = (line: string): PreviewUrlInfo | null => {
+export const detectPreviewUrl = (
+  line: string,
+  vsCodeProxyUri?: string | null
+): PreviewUrlInfo | null => {
   const cleaned = stripAnsi(line);
   // Some dev servers split terminal output into chunks, which can break
   // ports as `:40\n00`. Collapse whitespace inside the port before matching.
@@ -216,12 +231,38 @@ export const detectPreviewUrl = (line: string): PreviewUrlInfo | null => {
     };
   }
 
+  // VSCODE_PROXY_URI detection: match URLs like https://3000.code.vk.community.example.com/
+  // that the dev server may print instead of localhost URLs.
+  if (vsCodeProxyUri?.includes('{{port}}')) {
+    const [tplPrefix, tplSuffix] = vsCodeProxyUri.split('{{port}}');
+    if (tplPrefix != null && tplSuffix != null) {
+      const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const proxyRe = new RegExp(
+        `${esc(tplPrefix)}(\\d{2,5})${esc(tplSuffix)}`,
+        'i'
+      );
+      const proxyMatch = proxyRe.exec(normalized);
+      if (proxyMatch) {
+        const port = Number(proxyMatch[1]);
+        if (vibeKanbanPort && String(port) === vibeKanbanPort) {
+          return null;
+        }
+        return {
+          url: `http://localhost:${port}/`,
+          port,
+          scheme: 'http',
+        };
+      }
+    }
+  }
+
   return null;
 };
 
 function detectPreviewUrlFromBuffer(
   buffer: string,
-  blockedPort?: number
+  blockedPort?: number,
+  vsCodeProxyUri?: string | null
 ): PreviewUrlInfo | null {
   const lines = buffer.split(/\r?\n/);
   let best: PreviewUrlInfo | null = null;
@@ -231,7 +272,7 @@ function detectPreviewUrlFromBuffer(
     const line = lines[i];
     if (!line) continue;
 
-    const detected = detectPreviewUrl(line);
+    const detected = detectPreviewUrl(line, vsCodeProxyUri);
     if (!detected || (blockedPort && detected.port === blockedPort)) {
       continue;
     }
@@ -243,7 +284,7 @@ function detectPreviewUrlFromBuffer(
   if (best) return best;
 
   // Fallback for URLs split across chunk boundaries where line-by-line matching fails.
-  const fallback = detectPreviewUrl(buffer);
+  const fallback = detectPreviewUrl(buffer, vsCodeProxyUri);
   if (fallback && blockedPort && fallback.port === blockedPort) {
     return null;
   }
@@ -252,7 +293,8 @@ function detectPreviewUrlFromBuffer(
 
 export function usePreviewUrl(
   logs: Array<{ content: string }> | undefined,
-  previewProxyPort?: number
+  previewProxyPort?: number,
+  vsCodeProxyUri?: string | null
 ): PreviewUrlInfo | undefined {
   const [urlInfo, setUrlInfo] = useState<PreviewUrlInfo | undefined>();
   const lastIndexRef = useRef(0);
@@ -292,7 +334,7 @@ export function usePreviewUrl(
           ? merged.slice(-LOG_SCAN_BUFFER_LIMIT)
           : merged;
       detectedUrl =
-        detectPreviewUrlFromBuffer(logBufferRef.current, previewProxyPort) ??
+        detectPreviewUrlFromBuffer(logBufferRef.current, previewProxyPort, vsCodeProxyUri) ??
         undefined;
     }
 
@@ -306,7 +348,7 @@ export function usePreviewUrl(
     }
 
     lastIndexRef.current = logs.length;
-  }, [logs, urlInfo, previewProxyPort]);
+  }, [logs, urlInfo, previewProxyPort, vsCodeProxyUri]);
 
   return urlInfo;
 }

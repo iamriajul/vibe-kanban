@@ -152,9 +152,9 @@ export type CreateScratch = { payload: ScratchPayload, };
 
 export type UpdateScratch = { payload: ScratchPayload, };
 
-export type Workspace = { id: string, task_id: string | null, container_ref: string | null, branch: string, setup_completed_at: string | null, created_at: string, updated_at: string, archived: boolean, pinned: boolean, name: string | null, worktree_deleted: boolean, };
+export type Workspace = { id: string, task_id: string | null, container_ref: string | null, branch: string, setup_completed_at: string | null, created_at: string, updated_at: string, archived: boolean, pinned: boolean, name: string | null, worktree_deleted: boolean, owner_user_id: string | null, };
 
-export type WorkspaceWithStatus = { is_running: boolean, is_errored: boolean, id: string, task_id: string | null, container_ref: string | null, branch: string, setup_completed_at: string | null, created_at: string, updated_at: string, archived: boolean, pinned: boolean, name: string | null, worktree_deleted: boolean, };
+export type WorkspaceWithStatus = { is_running: boolean, is_errored: boolean, id: string, task_id: string | null, container_ref: string | null, branch: string, setup_completed_at: string | null, created_at: string, updated_at: string, archived: boolean, pinned: boolean, name: string | null, worktree_deleted: boolean, owner_user_id: string | null, };
 
 export type Session = { id: string, workspace_id: string, name: string | null, executor: string | null, agent_working_dir: string | null, created_at: string, updated_at: string, };
 
@@ -270,7 +270,7 @@ export type UserSystemInfo = { version: string, config: Config, machine_id: stri
 /**
  * Capabilities supported per executor (e.g., { "CLAUDE_CODE": ["SESSION_FORK"] })
  */
-capabilities: { [key in string]?: Array<BaseAgentCapability> }, shared_api_base: string | null, preview_proxy_port: number | null, executors: { [key in BaseCodingAgent]?: ExecutorProfile }, };
+capabilities: { [key in string]?: Array<BaseAgentCapability> }, shared_api_base: string | null, preview_proxy_port: number | null, vscode_proxy_uri: string | null, executors: { [key in BaseCodingAgent]?: ExecutorProfile }, };
 
 export type Environment = { os_type: string, os_version: string, os_architecture: string, bitness: string, };
 
@@ -404,7 +404,7 @@ export type CreateAndStartWorkspaceResponse = { workspace: Workspace, execution_
 
 export type UnifiedPrComment = { "comment_type": "general", id: string, author: string, author_association: string | null, body: string, created_at: string, url: string | null, } | { "comment_type": "review", id: bigint, author: string, author_association: string | null, body: string, created_at: string, url: string | null, path: string, line: bigint | null, side: string | null, diff_hunk: string | null, };
 
-export type ProviderKind = "git_hub" | "azure_dev_ops" | "unknown";
+export type ProviderKind = "git_hub" | "azure_dev_ops" | "git_lab" | "unknown";
 
 export type PullRequestDetail = { number: bigint, url: string, status: MergeStatus, merged_at: string | null, merge_commit_sha: string | null, title: string, base_branch: string, head_branch: string, };
 
@@ -496,7 +496,7 @@ export enum ThemeMode { LIGHT = "LIGHT", DARK = "DARK", SYSTEM = "SYSTEM" }
 
 export type EditorConfig = { editor_type: EditorType, custom_command: string | null, remote_ssh_host: string | null, remote_ssh_user: string | null, auto_install_extension: boolean, };
 
-export enum EditorType { VS_CODE = "VS_CODE", VS_CODE_INSIDERS = "VS_CODE_INSIDERS", CURSOR = "CURSOR", WINDSURF = "WINDSURF", INTELLI_J = "INTELLI_J", ZED = "ZED", XCODE = "XCODE", GOOGLE_ANTIGRAVITY = "GOOGLE_ANTIGRAVITY", CUSTOM = "CUSTOM" }
+export enum EditorType { VS_CODE = "VS_CODE", VS_CODE_INSIDERS = "VS_CODE_INSIDERS", CURSOR = "CURSOR", WINDSURF = "WINDSURF", INTELLI_J = "INTELLI_J", ZED = "ZED", XCODE = "XCODE", GOOGLE_ANTIGRAVITY = "GOOGLE_ANTIGRAVITY", CODE_SERVER = "CODE_SERVER", CUSTOM = "CUSTOM" }
 
 export type EditorOpenError = { "type": "executable_not_found", executable: string, editor_type: EditorType, } | { "type": "invalid_command", details: string, editor_type: EditorType, } | { "type": "launch_failed", executable: string, details: string, editor_type: EditorType, };
 
@@ -573,9 +573,9 @@ working_dir: string | null, };
 
 export type ScriptRequestLanguage = "Bash";
 
-export enum BaseCodingAgent { CLAUDE_CODE = "CLAUDE_CODE", AMP = "AMP", GEMINI = "GEMINI", CODEX = "CODEX", OPENCODE = "OPENCODE", CURSOR_AGENT = "CURSOR_AGENT", QWEN_CODE = "QWEN_CODE", COPILOT = "COPILOT", DROID = "DROID" }
+export enum BaseCodingAgent { CLAUDE_CODE = "CLAUDE_CODE", AMP = "AMP", GEMINI = "GEMINI", CODEX = "CODEX", OPENCODE = "OPENCODE", CURSOR_AGENT = "CURSOR_AGENT", QWEN_CODE = "QWEN_CODE", KIMI_CODE = "KIMI_CODE", ANTIGRAVITY = "ANTIGRAVITY", COPILOT = "COPILOT", DROID = "DROID" }
 
-export type CodingAgent = { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "CURSOR_AGENT": CursorAgent } | { "QWEN_CODE": QwenCode } | { "COPILOT": Copilot } | { "DROID": Droid };
+export type CodingAgent = { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "CURSOR_AGENT": CursorAgent } | { "QWEN_CODE": QwenCode } | { "KIMI_CODE": KimiCode } | { "ANTIGRAVITY": AntiGravity } | { "COPILOT": Copilot } | { "DROID": Droid };
 
 export type SlashCommandDescription = { 
 /**
@@ -615,15 +615,15 @@ models?: Array<string>,
  */
 reasoning_by_model?: { [key in string]?: string }, };
 
-export type ExecutorProfile = { recently_used_models?: ExecutorRecentModels | null, } & ({ [key in string]?: { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "CURSOR_AGENT": CursorAgent } | { "QWEN_CODE": QwenCode } | { "COPILOT": Copilot } | { "DROID": Droid } });
+export type ExecutorProfile = { recently_used_models?: ExecutorRecentModels | null, } & ({ [key in string]?: { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "CURSOR_AGENT": CursorAgent } | { "QWEN_CODE": QwenCode } | { "KIMI_CODE": KimiCode } | { "ANTIGRAVITY": AntiGravity } | { "COPILOT": Copilot } | { "DROID": Droid } });
 
 export type ExecutorConfigs = { executors: { [key in BaseCodingAgent]?: ExecutorProfile }, };
 
-export enum BaseAgentCapability { SESSION_FORK = "SESSION_FORK", SETUP_HELPER = "SETUP_HELPER", CONTEXT_USAGE = "CONTEXT_USAGE" }
+export enum BaseAgentCapability { SESSION_FORK = "SESSION_FORK", AGENT_STEERING = "AGENT_STEERING", SETUP_HELPER = "SETUP_HELPER", CONTEXT_USAGE = "CONTEXT_USAGE" }
 
 export type ClaudeEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
-export type ClaudeCode = { append_prompt: AppendPrompt, claude_code_router?: boolean | null, plan?: boolean | null, approvals?: boolean | null, model?: string | null, effort?: ClaudeEffort | null, agent?: string | null, dangerously_skip_permissions?: boolean | null, disable_api_key?: boolean | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
+export type ClaudeCode = { append_prompt: AppendPrompt, claude_code_router?: boolean | null, cladup?: boolean | null, plan?: boolean | null, approvals?: boolean | null, model?: string | null, effort?: ClaudeEffort | null, agent?: string | null, dangerously_skip_permissions?: boolean | null, disable_api_key?: boolean | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
 
 export type Gemini = { append_prompt: AppendPrompt, model?: string | null, yolo?: boolean | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
 
@@ -656,6 +656,10 @@ auto_approve: boolean,
 auto_compact: boolean, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
 
 export type QwenCode = { append_prompt: AppendPrompt, model?: string | null, agent?: string | null, yolo?: boolean | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
+
+export type KimiCode = { append_prompt: AppendPrompt, model?: string | null, yolo?: boolean | null, context_window?: number | null, mcp_config_file?: string | null, mcp_config?: string | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
+
+export type AntiGravity = { append_prompt: AppendPrompt, model?: string | null, effort?: string | null, dangerously_skip_permissions?: boolean | null, sandbox?: boolean | null, print_timeout?: string | null, add_dir?: Array<string> | null, context_window?: number | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
 
 export type Droid = { append_prompt: AppendPrompt, autonomy: Autonomy, model?: string | null, reasoning_effort?: DroidReasoningEffort | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
 
@@ -725,7 +729,7 @@ unified_diff: string,
  */
 has_line_numbers: boolean, };
 
-export type ActionType = { "action": "file_read", path: string, } | { "action": "file_edit", path: string, changes: Array<FileChange>, } | { "action": "command_run", command: string, result: CommandRunResult | null, category: CommandCategory, } | { "action": "search", query: string, } | { "action": "web_fetch", url: string, } | { "action": "tool", tool_name: string, arguments: JsonValue | null, result: ToolResult | null, } | { "action": "task_create", description: string, subagent_type: string | null, result: ToolResult | null, } | { "action": "plan_presentation", plan: string, } | { "action": "todo_management", todos: Array<TodoItem>, operation: string, } | { "action": "ask_user_question", questions: Array<AskUserQuestionItem>, } | { "action": "other", description: string, };
+export type ActionType = { "action": "file_read", path: string, } | { "action": "file_edit", path: string, changes: Array<FileChange>, } | { "action": "command_run", command: string, result: CommandRunResult | null, category: CommandCategory, } | { "action": "search", query: string, } | { "action": "web_fetch", url: string, } | { "action": "tool", tool_name: string, arguments: JsonValue | null, result: ToolResult | null, } | { "action": "task_create", description: string, subagent_type: string | null, prompt: string | null, model: string | null, effort: string | null, result: ToolResult | null, } | { "action": "plan_presentation", plan: string, } | { "action": "todo_management", todos: Array<TodoItem>, operation: string, } | { "action": "ask_user_question", questions: Array<AskUserQuestionItem>, } | { "action": "other", description: string, };
 
 export type AnsweredQuestion = { question: string, answer: Array<string>, };
 

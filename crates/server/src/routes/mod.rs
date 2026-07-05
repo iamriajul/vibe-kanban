@@ -30,10 +30,14 @@ pub mod sessions;
 pub mod ssh_session;
 pub mod tags;
 pub mod terminal;
+pub mod web_push;
 pub mod webrtc;
 pub mod workspaces;
 
-pub fn router(deployment: DeploymentImpl) -> IntoMakeService<Router> {
+pub fn router(
+    deployment: DeploymentImpl,
+    vapid_keys: crate::runtime::web_push::VapidKeys,
+) -> IntoMakeService<Router> {
     let relay_signed_routes = Router::new()
         .route("/health", get(health::health_check))
         .merge(config::router())
@@ -53,6 +57,7 @@ pub fn router(deployment: DeploymentImpl) -> IntoMakeService<Router> {
         .merge(releases::router())
         .merge(sessions::router(&deployment))
         .merge(terminal::router())
+        .merge(web_push::router(vapid_keys))
         .route("/ssh-session", get(ssh_session::ssh_session_ws))
         .nest("/remote", remote::router())
         .merge(webrtc::router())
@@ -71,6 +76,10 @@ pub fn router(deployment: DeploymentImpl) -> IntoMakeService<Router> {
         .merge(relay_auth::router())
         .merge(host_relay::router(&deployment))
         .merge(relay_signed_routes)
+        .layer(axum::middleware::from_fn_with_state(
+            deployment.clone(),
+            middleware::bind_auth_session,
+        ))
         .layer(ValidateRequestHeaderLayer::custom(
             middleware::validate_origin,
         ))

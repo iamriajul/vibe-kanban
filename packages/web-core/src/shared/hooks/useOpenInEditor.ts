@@ -1,6 +1,7 @@
 import { useCallback } from 'react';
 import { workspacesApi, relayApi } from '@/shared/lib/api';
 import { EditorSelectionDialog } from '@/shared/dialogs/command-bar/EditorSelectionDialog';
+import { alertIfCodeServerNotConfigured } from '@/shared/lib/editorWarnings';
 import type { EditorType } from 'shared/types';
 import { useAppRuntime } from '@/shared/hooks/useAppRuntime';
 import { useHostId } from '@/shared/providers/HostIdProvider';
@@ -42,6 +43,9 @@ export function useOpenInEditor(
           window.open(response.url, '_blank');
         }
       } catch (err) {
+        if (alertIfCodeServerNotConfigured(err)) {
+          return;
+        }
         console.error('Failed to open editor:', err);
         if (!editorType) {
           if (onShowEditorDialog) {

@@ -1,6 +1,8 @@
+use std::time::Duration;
+
 use anyhow;
 use axum::{
-    Extension, Router,
+    Extension, Json, Router,
     extract::{Path, Query, State, ws::Message},
     middleware::from_fn_with_state,
     response::{IntoResponse, Json as ResponseJson},
@@ -32,6 +34,11 @@ struct SessionExecutionProcessQuery {
     /// If true, include soft-deleted (dropped) processes in results/stream
     #[serde(default)]
     pub show_soft_deleted: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SteerExecutionProcessRequest {
+    pub message: String,
 }
 
 async fn get_execution_process_by_id(
@@ -103,6 +110,9 @@ async fn handle_raw_logs_ws(
         }
     });
 
+    let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
+    ping_interval.tick().await; // skip first immediate tick
+
     loop {
         tokio::select! {
             item = stream.next() => {
@@ -125,6 +135,11 @@ async fn handle_raw_logs_ws(
                     Ok(Some(_)) => {}
                     Ok(None) => break,
                     Err(_) => break,
+                }
+            }
+            _ = ping_interval.tick() => {
+                if socket.send(Message::Ping(vec![].into())).await.is_err() {
+                    break;
                 }
             }
         }
@@ -170,6 +185,10 @@ async fn handle_normalized_logs_ws(
     stream: impl futures_util::Stream<Item = anyhow::Result<LogMsg>> + Unpin + Send + 'static,
 ) -> anyhow::Result<()> {
     let mut stream = stream.map_ok(|msg| msg.to_ws_message_unchecked());
+
+    let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
+    ping_interval.tick().await; // skip first immediate tick
+
     loop {
         tokio::select! {
             item = stream.next() => {
@@ -194,6 +213,11 @@ async fn handle_normalized_logs_ws(
                     Err(_) => break,
                 }
             }
+            _ = ping_interval.tick() => {
+                if socket.send(Message::Ping(vec![].into())).await.is_err() {
+                    break;
+                }
+            }
         }
     }
     let _ = socket.close().await;
@@ -207,6 +231,19 @@ async fn stop_execution_process(
     deployment
         .container()
         .stop_execution(&execution_process, ExecutionProcessStatus::Killed)
+        .await?;
+
+    Ok(ResponseJson(ApiResponse::success(())))
+}
+
+async fn steer_execution_process(
+    Extension(execution_process): Extension<ExecutionProcess>,
+    State(deployment): State<DeploymentImpl>,
+    Json(payload): Json<SteerExecutionProcessRequest>,
+) -> Result<ResponseJson<ApiResponse<()>>, ApiError> {
+    deployment
+        .container()
+        .steer_execution(&execution_process, &payload.message)
         .await?;
 
     Ok(ResponseJson(ApiResponse::success(())))
@@ -244,6 +281,9 @@ async fn handle_execution_processes_by_session_ws(
         .await?
         .map_ok(|msg| msg.to_ws_message_unchecked());
 
+    let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
+    ping_interval.tick().await; // skip first immediate tick
+
     loop {
         tokio::select! {
             item = stream.next() => {
@@ -268,6 +308,11 @@ async fn handle_execution_processes_by_session_ws(
                     Err(_) => break,
                 }
             }
+            _ = ping_interval.tick() => {
+                if socket.send(Message::Ping(vec![].into())).await.is_err() {
+                    break;
+                }
+            }
         }
     }
     Ok(())
@@ -287,6 +332,7 @@ pub(super) fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
     let workspace_id_router = Router::new()
         .route("/", get(get_execution_process_by_id))
         .route("/stop", post(stop_execution_process))
+        .route("/steer", post(steer_execution_process))
         .route("/repo-states", get(get_execution_process_repo_states))
         .route("/raw-logs/ws", get(stream_raw_logs_ws))
         .route("/normalized-logs/ws", get(stream_normalized_logs_ws))

@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tokio::process::Command;
+use tokio::{io::AsyncWriteExt, process::Command, sync::mpsc};
 use tokio_util::sync::CancellationToken;
 use ts_rs::TS;
 use workspace_utils::{
@@ -58,11 +58,13 @@ use crate::{
 
 const SUPPRESSED_STDERR_PATTERNS: &[&str] = &["[WARN] Fast mode requires the native binary"];
 
-fn base_command(claude_code_router: bool) -> &'static str {
-    if claude_code_router {
-        "npx -y @musistudio/claude-code-router@1.0.66 code"
+fn base_command(claude_code_router: bool, cladup: bool) -> &'static str {
+    if cladup {
+        "npx -y github:iamriajul/cladup"
+    } else if claude_code_router {
+        "npx -y @musistudio/claude-code-router@2.0.0 code"
     } else {
-        "npx -y @anthropic-ai/claude-code@2.1.119"
+        "npx -y @anthropic-ai/claude-code@2.1.173"
     }
 }
 
@@ -122,6 +124,12 @@ pub struct ClaudeCode {
     pub append_prompt: AppendPrompt,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_code_router: Option<bool>,
+    #[schemars(
+        title = "Use Cladup",
+        description = "Run Claude through the Cladup shim instead of invoking Claude Code print mode directly"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cladup: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -146,17 +154,24 @@ pub struct ClaudeCode {
 }
 
 impl ClaudeCode {
+    fn cladup_enabled(&self) -> bool {
+        self.cladup.unwrap_or(false)
+    }
+
     async fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
-        // If base_command_override is provided and claude_code_router is also set, log a warning
-        if self.cmd.base_command_override.is_some() && self.claude_code_router.is_some() {
+        let claude_code_router = self.claude_code_router.unwrap_or(false);
+        let cladup = self.cladup_enabled();
+
+        if self.cmd.base_command_override.is_some() && (claude_code_router || cladup) {
             tracing::warn!(
-                "base_command_override is set, this will override the claude_code_router setting"
+                "base_command_override is set, this will override claude_code_router and cladup settings"
             );
+        } else if claude_code_router && cladup {
+            tracing::warn!("cladup and claude_code_router are both enabled; using cladup");
         }
 
         let mut builder =
-            CommandBuilder::new(base_command(self.claude_code_router.unwrap_or(false)))
-                .params(["-p"]);
+            CommandBuilder::new(base_command(claude_code_router, cladup)).params(["-p"]);
 
         let plan = self.plan.unwrap_or(false);
         let approvals = self.approvals.unwrap_or(false);
@@ -164,8 +179,14 @@ impl ClaudeCode {
             tracing::warn!("Both plan and approvals are enabled. Plan will take precedence.");
         }
         if plan || approvals {
-            // Enable bypass at startup, otherwise we cannot change to it after exiting plan mode
-            builder = builder.extend_params(["--permission-prompt-tool=stdio"]);
+            if cladup {
+                tracing::warn!(
+                    "cladup does not support Claude's stdio approval protocol; using bypass permissions"
+                );
+            } else {
+                // Enable bypass at startup, otherwise we cannot change to it after exiting plan mode
+                builder = builder.extend_params(["--permission-prompt-tool=stdio"]);
+            }
             builder = builder.extend_params([format!(
                 "--permission-mode={}",
                 PermissionMode::BypassPermissions
@@ -185,13 +206,11 @@ impl ClaudeCode {
         if let Some(agent) = &self.agent {
             builder = builder.extend_params(["--agent", agent]);
         }
-        builder = builder.extend_params([
-            "--verbose",
-            "--output-format=stream-json",
-            "--input-format=stream-json",
-            "--include-partial-messages",
-            "--replay-user-messages",
-        ]);
+        builder = builder.extend_params(["--verbose", "--output-format=stream-json"]);
+        if !cladup {
+            builder = builder.extend_params(["--input-format=stream-json"]);
+        }
+        builder = builder.extend_params(["--include-partial-messages", "--replay-user-messages"]);
 
         apply_overrides(builder, &self.cmd)
     }
@@ -272,12 +291,14 @@ fn default_discovered_options() -> crate::executor_discovery::ExecutorDiscovered
     let effort_options =
         ReasoningOption::from_names(["low", "medium", "high", "xhigh", "max"].map(String::from));
 
-    let supports_effort = |id: &str| -> bool { id.contains("opus") || id.contains("sonnet") };
+    let supports_effort =
+        |id: &str| -> bool { id.contains("fable") || id.contains("opus") || id.contains("sonnet") };
 
     ExecutorDiscoveredOptions {
         model_selector: ModelSelectorConfig {
             providers: vec![],
             models: [
+                ("fable", "Fable 5"),
                 ("opus", "Opus"),
                 ("opus[1m]", "Opus (1M context)"),
                 ("sonnet", "Sonnet"),
@@ -410,6 +431,13 @@ impl StandardCodingAgentExecutor for ClaudeCode {
         use crate::{
             executor_discovery::ExecutorConfigCacheKey, executors::utils::executor_options_cache,
         };
+
+        if self.cladup.unwrap_or(false) {
+            let options = default_discovered_options();
+            return Ok(Box::pin(futures::stream::once(async move {
+                patch::executor_discovered_options(options)
+            })));
+        }
 
         let cache = executor_options_cache();
         let cmd_key = self.compute_cmd_key();
@@ -647,6 +675,18 @@ impl ClaudeCode {
             tracing::info!("ANTHROPIC_API_KEY removed from environment");
         }
 
+        if self.cladup_enabled() {
+            let mut child = command.group_spawn_no_window()?;
+
+            // Cladup print mode reads stdin to EOF before launching Claude.
+            if let Some(mut stdin) = child.inner().stdin.take() {
+                stdin.write_all(combined_prompt.as_bytes()).await?;
+                stdin.shutdown().await?;
+            }
+
+            return Ok(child.into());
+        }
+
         let mut child = command.group_spawn_no_window()?;
         let child_stdout = child.inner().stdout.take().ok_or_else(|| {
             ExecutorError::Io(std::io::Error::other("Claude Code missing stdout"))
@@ -662,6 +702,7 @@ impl ClaudeCode {
 
         // Create cancellation token for graceful shutdown
         let cancel = CancellationToken::new();
+        let (steering_tx, mut steering_rx) = mpsc::channel::<String>(16);
 
         // Spawn task to handle the SDK client with control protocol
         let prompt_clone = combined_prompt.clone();
@@ -694,6 +735,19 @@ impl ClaudeCode {
                 tracing::warn!("Failed to set permission mode to {permission_mode}: {e}");
             }
 
+            let steering_peer = protocol_peer.clone();
+            tokio::spawn(async move {
+                while let Some(message) = steering_rx.recv().await {
+                    let message = message.trim();
+                    if message.is_empty() {
+                        continue;
+                    }
+                    if let Err(e) = steering_peer.send_user_message(message.to_string()).await {
+                        tracing::warn!("failed to steer Claude Code process: {e}");
+                    }
+                }
+            });
+
             // Send user message
             if let Err(e) = protocol_peer.send_user_message(prompt_clone).await {
                 tracing::error!("Failed to send prompt: {e}");
@@ -707,6 +761,7 @@ impl ClaudeCode {
             child,
             exit_signal: None,
             cancel: Some(cancel),
+            steering: Some(steering_tx),
         })
     }
 }
@@ -755,6 +810,22 @@ impl ClaudeLogProcessor {
             last_assistant_message: None,
             main_model_context_window: DEFAULT_CLAUDE_CONTEXT_WINDOW,
             context_tokens_used: 0,
+        }
+    }
+
+    fn task_details_from_tool_data(
+        tool_data: &ClaudeToolData,
+    ) -> (Option<String>, Option<String>, Option<String>) {
+        if let ClaudeToolData::Task {
+            subagent_type,
+            prompt,
+            model,
+            ..
+        } = tool_data
+        {
+            (subagent_type.clone(), prompt.clone(), model.clone())
+        } else {
+            (None, None, None)
         }
     }
 
@@ -1126,6 +1197,7 @@ impl ClaudeLogProcessor {
                 description,
                 prompt,
                 subagent_type,
+                model,
             } => {
                 let task_description = if let Some(desc) = description {
                     desc.clone()
@@ -1135,6 +1207,9 @@ impl ClaudeLogProcessor {
                 ActionType::TaskCreate {
                     description: task_description,
                     subagent_type: subagent_type.clone(),
+                    prompt: prompt.clone(),
+                    model: model.clone(),
+                    effort: None,
                     result: None,
                 }
             }
@@ -1286,6 +1361,9 @@ impl ClaudeLogProcessor {
                                 ActionType::TaskCreate {
                                     description: desc.clone(),
                                     subagent_type: subagent_type.clone(),
+                                    prompt: prompt.clone(),
+                                    model: model.clone(),
+                                    effort: None,
                                     result: None,
                                 },
                                 ToolStatus::Created,
@@ -1302,6 +1380,7 @@ impl ClaudeLogProcessor {
                                         subagent_type,
                                         description: description.clone(),
                                         prompt: prompt.clone(),
+                                        model: model.clone(),
                                     },
                                     content: desc,
                                 },
@@ -1312,18 +1391,16 @@ impl ClaudeLogProcessor {
                         if let (Some(tool_use_id), Some(desc)) = (tool_use_id, description)
                             && let Some(info) = self.tool_map.get(tool_use_id).cloned()
                         {
-                            let subagent_type =
-                                if let ClaudeToolData::Task { subagent_type, .. } = &info.tool_data
-                                {
-                                    subagent_type.clone()
-                                } else {
-                                    None
-                                };
+                            let (subagent_type, prompt, model) =
+                                Self::task_details_from_tool_data(&info.tool_data);
                             let entry = Self::tool_use_entry(
                                 info.tool_name.clone(),
                                 ActionType::TaskCreate {
                                     description: info.content.clone(),
                                     subagent_type,
+                                    prompt,
+                                    model,
+                                    effort: None,
                                     result: None,
                                 },
                                 ToolStatus::Created,
@@ -1340,13 +1417,8 @@ impl ClaudeLogProcessor {
                                 Some("failed") | Some("error") => ToolStatus::Failed,
                                 _ => ToolStatus::Success,
                             };
-                            let subagent_type =
-                                if let ClaudeToolData::Task { subagent_type, .. } = &info.tool_data
-                                {
-                                    subagent_type.clone()
-                                } else {
-                                    None
-                                };
+                            let (subagent_type, prompt, model) =
+                                Self::task_details_from_tool_data(&info.tool_data);
                             let desc = summary
                                 .clone()
                                 .or(description.clone())
@@ -1356,6 +1428,9 @@ impl ClaudeLogProcessor {
                                 ActionType::TaskCreate {
                                     description: desc.clone(),
                                     subagent_type,
+                                    prompt,
+                                    model,
+                                    effort: None,
                                     result: None,
                                 },
                                 task_status,
@@ -1607,20 +1682,17 @@ impl ClaudeLogProcessor {
                                 ToolStatus::Success
                             };
 
-                            // Extract subagent_type from the original tool_data
-                            let subagent_type =
-                                if let ClaudeToolData::Task { subagent_type, .. } = &info.tool_data
-                                {
-                                    subagent_type.clone()
-                                } else {
-                                    None
-                                };
+                            let (subagent_type, prompt, model) =
+                                Self::task_details_from_tool_data(&info.tool_data);
 
                             let entry = Self::tool_use_entry(
                                 info.tool_name.clone(),
                                 ActionType::TaskCreate {
                                     description: info.content.clone(),
                                     subagent_type,
+                                    prompt,
+                                    model,
+                                    effort: None,
                                     result: Some(crate::logs::ToolResult {
                                         r#type: res_type,
                                         value: res_value,
@@ -2532,6 +2604,8 @@ pub enum ClaudeToolData {
         subagent_type: Option<String>,
         description: Option<String>,
         prompt: Option<String>,
+        #[serde(default)]
+        model: Option<String>,
     },
     #[serde(rename = "Glob", alias = "glob")]
     Glob {
@@ -2778,6 +2852,27 @@ mod tests {
         normalize_helper(&mut processor, json, worktree)
     }
 
+    fn test_executor() -> ClaudeCode {
+        ClaudeCode {
+            claude_code_router: Some(false),
+            cladup: None,
+            plan: None,
+            approvals: None,
+            model: None,
+            effort: None,
+            agent: None,
+            append_prompt: AppendPrompt::default(),
+            dangerously_skip_permissions: None,
+            cmd: crate::command::CmdOverrides {
+                base_command_override: None,
+                additional_params: None,
+                env: None,
+            },
+            approvals_service: None,
+            disable_api_key: None,
+        }
+    }
+
     #[test]
     fn test_claude_json_parsing() {
         let system_json =
@@ -2933,28 +3028,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_cladup_builds_one_shot_command() {
+        let mut executor = test_executor();
+        executor.cladup = Some(true);
+
+        let builder = executor.build_command_builder().await.unwrap();
+
+        assert_eq!(builder.base, "npx -y github:iamriajul/cladup");
+        let params = builder.params.as_ref().expect("Claude command params");
+        assert_eq!(params.first().map(String::as_str), Some("-p"));
+        assert!(params.contains(&"--output-format=stream-json".to_string()));
+        assert!(!params.contains(&"--input-format=stream-json".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_cladup_does_not_use_stdio_permission_prompt() {
+        let mut executor = test_executor();
+        executor.cladup = Some(true);
+        executor.approvals = Some(true);
+
+        let builder = executor.build_command_builder().await.unwrap();
+        let params = builder.params.as_ref().expect("Claude command params");
+
+        assert!(!params.contains(&"--permission-prompt-tool=stdio".to_string()));
+        assert!(params.contains(&format!(
+            "--permission-mode={}",
+            PermissionMode::BypassPermissions
+        )));
+    }
+
+    #[tokio::test]
+    async fn test_standard_claude_keeps_control_protocol_command() {
+        let mut executor = test_executor();
+        executor.approvals = Some(true);
+
+        let builder = executor.build_command_builder().await.unwrap();
+        let params = builder.params.as_ref().expect("Claude command params");
+
+        assert_eq!(builder.base, "npx -y @anthropic-ai/claude-code@2.1.173");
+        assert!(params.contains(&"--permission-prompt-tool=stdio".to_string()));
+        assert!(params.contains(&"--input-format=stream-json".to_string()));
+    }
+
+    #[test]
+    fn test_default_options_include_fable_model_with_effort() {
+        let options = default_discovered_options();
+        let fable = options
+            .model_selector
+            .models
+            .iter()
+            .find(|model| model.id == "fable")
+            .expect("fable model");
+
+        assert_eq!(fable.name, "Fable 5");
+        assert_eq!(
+            fable
+                .reasoning_options
+                .iter()
+                .map(|option| option.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["low", "medium", "high", "xhigh", "max"]
+        );
+        assert_eq!(
+            options.model_selector.default_model.as_deref(),
+            Some("opus")
+        );
+    }
+
+    #[tokio::test]
     async fn test_streaming_patch_generation() {
         use std::sync::Arc;
 
         use workspace_utils::msg_store::MsgStore;
 
-        let executor = ClaudeCode {
-            claude_code_router: Some(false),
-            plan: None,
-            approvals: None,
-            model: None,
-            effort: None,
-            agent: None,
-            append_prompt: AppendPrompt::default(),
-            dangerously_skip_permissions: None,
-            cmd: crate::command::CmdOverrides {
-                base_command_override: None,
-                additional_params: None,
-                env: None,
-            },
-            approvals_service: None,
-            disable_api_key: None,
-        };
+        let executor = test_executor();
         let msg_store = Arc::new(MsgStore::new());
         let current_dir = std::path::PathBuf::from("/tmp/test-worktree");
 

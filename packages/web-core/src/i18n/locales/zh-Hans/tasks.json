@@ -395,6 +395,7 @@
       "loading": "加载中",
       "send": "发送",
       "sending": "发送中",
+      "steer": "Steer",
       "queue": "加入队列",
       "cancelQueue": "取消队列",
       "requestChanges": "请求更改",

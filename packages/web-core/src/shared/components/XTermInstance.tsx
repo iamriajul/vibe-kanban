@@ -7,6 +7,24 @@ import '@xterm/xterm/css/xterm.css';
 import { useTheme } from '@/shared/hooks/useTheme';
 import { getTerminalTheme } from '@/shared/lib/terminalTheme';
 import { useTerminal } from '@/shared/hooks/useTerminal';
+import { useUserSystem } from '@/shared/hooks/useUserSystem';
+
+const LOCAL_URL_RE =
+  /^https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(\d+)(.*)/;
+
+function resolveTerminalUrl(
+  uri: string,
+  proxyUri: string | null
+): string {
+  if (!proxyUri || !proxyUri.includes('{{port}}')) return uri;
+  const m = uri.match(LOCAL_URL_RE);
+  if (!m) return uri;
+  const [, port, rest] = m;
+  const base = proxyUri.replace('{{port}}', port);
+  // Avoid double trailing slash when rest is empty and base already ends with /
+  if (!rest || rest === '/') return base;
+  return base.replace(/\/$/, '') + rest;
+}
 
 interface XTermInstanceProps {
   tabId: string;
@@ -27,6 +45,9 @@ export function XTermInstance({
   const fitAddonRef = useRef<FitAddon | null>(null);
   const initialSizeRef = useRef({ cols: 80, rows: 24 });
   const { theme } = useTheme();
+  const { vsCodeProxyUri } = useUserSystem();
+  const vsCodeProxyUriRef = useRef(vsCodeProxyUri);
+  vsCodeProxyUriRef.current = vsCodeProxyUri;
   const {
     registerTerminalInstance,
     getTerminalInstance,
@@ -73,7 +94,9 @@ export function XTermInstance({
     });
 
     const fitAddon = new FitAddon();
-    const webLinksAddon = new WebLinksAddon();
+    const webLinksAddon = new WebLinksAddon((_event, uri) => {
+      window.open(resolveTerminalUrl(uri, vsCodeProxyUriRef.current), '_blank');
+    });
 
     terminal.loadAddon(fitAddon);
     terminal.loadAddon(webLinksAddon);

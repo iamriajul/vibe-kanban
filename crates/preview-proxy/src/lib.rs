@@ -6,6 +6,12 @@
 //! The proxy listens on a separate port and routes requests based on the
 //! Host header subdomain. A request to `{port}.localhost:{proxy_port}/path`
 //! is forwarded to `localhost:{port}/path`.
+//!
+//! When accessed via VSCODE_PROXY_URI (cloud/code-server deployments), subdomain
+//! routing is unavailable. In that mode the target port is passed via a
+//! `__vk_port` query parameter on the initial request. The proxy persists it in
+//! a `vk_preview_target` cookie so subsequent sub-resource requests (CSS, JS,
+//! images, fetch) are routed to the correct dev server.
 
 use std::net::SocketAddr;
 
@@ -363,6 +369,149 @@ fn rewrite_redirect_like_headers(
     }
 }
 
+/// Cookie name used to persist the target dev-server port when routing via
+/// VSCODE_PROXY_URI (`__vk_port` query-param flow).
+const VK_PREVIEW_TARGET_COOKIE: &str = "vk_preview_target";
+
+/// Extract the target dev-server port from either the `__vk_port` query
+/// parameter or the `vk_preview_target` cookie. Returns `None` when neither
+/// is present.
+fn extract_target_from_query_or_cookie(request: &Request) -> Option<PreviewTarget> {
+    // 1. Prefer the explicit query-param (set on the initial iframe load).
+    if let Some(query) = request.uri().query() {
+        for pair in query.split('&') {
+            if let Some(value) = pair.strip_prefix("__vk_port=") {
+                if let Ok(port) = value.parse::<u16>() {
+                    return Some(PreviewTarget {
+                        port,
+                        relay_host_id: None,
+                    });
+                }
+            }
+        }
+    }
+
+    // 2. Fall back to the cookie (set by a previous response for sub-resources).
+    let cookies = request.headers().get_all(header::COOKIE);
+    for cookie_header in cookies {
+        let Ok(value) = cookie_header.to_str() else {
+            continue;
+        };
+        for cookie in value.split(';') {
+            let cookie = cookie.trim();
+            if let Some(port_str) = cookie.strip_prefix("vk_preview_target=") {
+                if let Ok(port) = port_str.trim().parse::<u16>() {
+                    return Some(PreviewTarget {
+                        port,
+                        relay_host_id: None,
+                    });
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Strip the `__vk_port` parameter from a query string so the upstream
+/// dev-server never sees it.
+fn strip_vk_port_from_query(query: &str) -> String {
+    query
+        .split('&')
+        .filter(|pair| !pair.starts_with("__vk_port="))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+/// Rewrite an absolute localhost redirect to a relative path.
+/// Used in VSCODE_PROXY_URI mode where the browser should stay on the proxy origin.
+fn rewrite_redirect_to_relative(
+    value: &str,
+    target_port: u16,
+) -> Option<String> {
+    let original_value = value.trim();
+    if original_value.is_empty() {
+        return None;
+    }
+
+    let normalized_value = normalize_redirect_like_url_token(original_value)?;
+
+    // Already relative — leave as-is.
+    if (normalized_value.starts_with('/') && !normalized_value.starts_with("//"))
+        || normalized_value.starts_with('?')
+        || normalized_value.starts_with('#')
+    {
+        if normalized_value == original_value {
+            return None;
+        }
+        return Some(normalized_value);
+    }
+
+    let parsed = if normalized_value.starts_with("//") {
+        reqwest::Url::parse(&format!("http:{normalized_value}")).ok()?
+    } else {
+        reqwest::Url::parse(&normalized_value).ok()?
+    };
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    if !is_loopback_redirect_host(&host) {
+        if normalized_value == original_value {
+            return None;
+        }
+        return Some(normalized_value);
+    }
+
+    let parsed_port = parsed.port_or_known_default()?;
+    if parsed_port != target_port {
+        if normalized_value == original_value {
+            return None;
+        }
+        return Some(normalized_value);
+    }
+
+    // Convert to relative: keep path + query + fragment only.
+    let mut relative = parsed.path().to_string();
+    if let Some(query) = parsed.query() {
+        relative.push('?');
+        relative.push_str(query);
+    }
+    if let Some(fragment) = parsed.fragment() {
+        relative.push('#');
+        relative.push_str(fragment);
+    }
+    Some(relative)
+}
+
+/// Like [`rewrite_redirect_like_headers`] but converts absolute localhost
+/// redirects to relative paths instead of subdomain URLs. Used in
+/// VSCODE_PROXY_URI mode where the browser must stay on the single proxy origin.
+fn rewrite_redirect_like_headers_relative(
+    headers: &mut [(HeaderName, HeaderValue)],
+    target_port: u16,
+) {
+    for (name, value) in headers.iter_mut() {
+        let name_lower = name.as_str().to_ascii_lowercase();
+        if !is_redirect_like_header_name(&name_lower) {
+            continue;
+        }
+
+        let Ok(value_str) = value.to_str() else {
+            continue;
+        };
+
+        let rewritten = if name_lower == "refresh" {
+            None
+        } else {
+            rewrite_redirect_to_relative(value_str, target_port)
+        };
+
+        if let Some(rewritten) = rewritten
+            && let Ok(rewritten_header) = HeaderValue::from_str(&rewritten)
+        {
+            *value = rewritten_header;
+        }
+    }
+}
+
 fn extract_target_from_host(headers: &HeaderMap) -> Option<PreviewTarget> {
     let host = headers.get(header::HOST)?.to_str().ok()?;
     let subdomain = host.split('.').next()?;
@@ -387,16 +536,45 @@ pub async fn proxy_subdomain_request(
     proxy_port: u16,
     request: Request,
 ) -> Response {
-    let target = match extract_target_from_host(request.headers()) {
-        Some(port) => port,
-        None => {
-            return (StatusCode::BAD_REQUEST, "No valid port in Host subdomain").into_response();
-        }
-    };
+    // Try subdomain routing first (local mode: {port}.localhost:{proxyPort}).
+    // If the subdomain yields the proxy's own port (happens when code-server
+    // forwards with Host: {proxyPort}.code.vk.community.example.com), treat it as
+    // "no usable subdomain" and fall through to cookie/query routing.
+    let (target, use_relative_redirects) =
+        match extract_target_from_host(request.headers()) {
+            Some(t) if t.port != proxy_port => (t, false),
+            _ => match extract_target_from_query_or_cookie(&request) {
+                Some(t) => (t, true),
+                None => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        "No valid port in Host subdomain or cookie",
+                    )
+                        .into_response();
+                }
+            },
+        };
+
+    if target.port == proxy_port {
+        return (
+            StatusCode::BAD_REQUEST,
+            "Target port matches proxy port",
+        )
+            .into_response();
+    }
 
     let path = normalized_proxy_path(request.uri().path()).to_string();
 
-    proxy_impl(service, backend_addr, proxy_port, target, path, request).await
+    proxy_impl(
+        service,
+        backend_addr,
+        proxy_port,
+        target,
+        path,
+        use_relative_redirects,
+        request,
+    )
+    .await
 }
 
 async fn proxy_impl(
@@ -405,6 +583,7 @@ async fn proxy_impl(
     proxy_port: u16,
     target: PreviewTarget,
     path_str: String,
+    use_relative_redirects: bool,
     request: Request,
 ) -> Response {
     let (mut parts, body) = request.into_parts();
@@ -412,7 +591,14 @@ async fn proxy_impl(
     // Extract query string and subprotocols before WebSocket upgrade.
     // Both are required: Vite 6+ needs ?token= for auth, and checks
     // Sec-WebSocket-Protocol: vite-hmr before accepting the upgrade.
-    let query_string = parts.uri.query().map(|q| q.to_string());
+    let raw_query = parts.uri.query().unwrap_or_default();
+    let query_string = if use_relative_redirects {
+        let cleaned = strip_vk_port_from_query(raw_query);
+        if cleaned.is_empty() { None } else { Some(cleaned) }
+    } else {
+        let q = raw_query.to_string();
+        if q.is_empty() { None } else { Some(q) }
+    };
     let ws_protocols: Option<String> = extract_ws_protocols(&parts.headers);
 
     if let Ok(ws) = WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
@@ -449,7 +635,7 @@ async fn proxy_impl(
     }
 
     let request = Request::from_parts(parts, body);
-    http_proxy_handler(service, backend_addr, proxy_port, target, path_str, request).await
+    http_proxy_handler(service, backend_addr, proxy_port, target, path_str, use_relative_redirects, request).await
 }
 
 async fn http_proxy_handler(
@@ -458,6 +644,7 @@ async fn http_proxy_handler(
     proxy_port: u16,
     target: PreviewTarget,
     path_str: String,
+    use_relative_redirects: bool,
     request: Request,
 ) -> Response {
     let (parts, body) = request.into_parts();
@@ -465,7 +652,12 @@ async fn http_proxy_handler(
     let headers = parts.headers;
     let original_uri = parts.uri;
 
-    let query_string = original_uri.query().unwrap_or_default();
+    let query_string_owned = if use_relative_redirects {
+        strip_vk_port_from_query(original_uri.query().unwrap_or_default())
+    } else {
+        original_uri.query().unwrap_or_default().to_string()
+    };
+    let query_string = query_string_owned.as_str();
     let normalized_path = normalized_proxy_path(&path_str);
 
     let is_rsc_request = headers.contains_key(header::HeaderName::from_static("rsc"));
@@ -544,12 +736,26 @@ async fn http_proxy_handler(
     let is_html = content_type.contains("text/html");
 
     let mut response_headers = collect_response_headers(response.headers(), is_html);
-    rewrite_redirect_like_headers(
-        &mut response_headers,
-        target.port,
-        Some(proxy_port),
-        target.relay_host_id,
-    );
+
+    if use_relative_redirects {
+        rewrite_redirect_like_headers_relative(&mut response_headers, target.port);
+    } else {
+        rewrite_redirect_like_headers(
+            &mut response_headers,
+            target.port,
+            Some(proxy_port),
+            target.relay_host_id,
+        );
+    }
+
+    if use_relative_redirects {
+        if let Ok(cookie_value) = HeaderValue::from_str(&format!(
+            "{}={}; Path=/; HttpOnly; SameSite=Lax",
+            VK_PREVIEW_TARGET_COOKIE, target.port
+        )) {
+            response_headers.push((header::SET_COOKIE, cookie_value));
+        }
+    }
 
     let status = StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::OK);
 

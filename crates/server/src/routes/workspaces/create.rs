@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use api_types::LoginStatus;
 use axum::{Json, extract::State, response::Json as ResponseJson};
 use db::models::{
     requests::{
@@ -34,11 +35,20 @@ pub(crate) async fn create_workspace_record(
         .git_branch_from_workspace(&workspace_id, branch_label)
         .await;
 
+    let owner_user_id = match deployment.auth_context().cached_profile().await {
+        Some(profile) => Some(profile.user_id.to_string()),
+        None => match deployment.get_login_status().await {
+            LoginStatus::LoggedIn { profile } => profile.map(|p| p.user_id.to_string()),
+            LoginStatus::LoggedOut => None,
+        },
+    };
+
     let workspace = Workspace::create(
         &deployment.db().pool,
         &CreateWorkspace {
             branch: git_branch_name,
             name: name.filter(|workspace_name| !workspace_name.is_empty()),
+            owner_user_id,
         },
         workspace_id,
     )

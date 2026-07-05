@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useDropzone } from 'react-dropzone';
 import {
   type AskUserQuestionItem,
@@ -62,9 +62,61 @@ import { useActionVisibilityContext } from '@/shared/hooks/useActionVisibilityCo
 import { PrCommentsDialog } from '@/shared/dialogs/tasks/PrCommentsDialog';
 import type { NormalizedComment } from '@vibe/ui/components/pr-comment-node';
 import { useAppNavigation } from '@/shared/hooks/useAppNavigation';
-import { sessionsApi } from '@/shared/lib/api';
+import { executionProcessesApi, sessionsApi } from '@/shared/lib/api';
 import { RenameSessionDialog } from '@vibe/ui/components/RenameSessionDialog';
 import type { TurnNavigationItem } from '@vibe/ui/components/TurnNavigationPopup';
+import type { PatchTypeWithKey } from '@/shared/hooks/useConversationHistory/types';
+import { Checkbox } from '@vibe/ui/components/Checkbox';
+import { useModelSelectorConfig } from '@/shared/hooks/useExecutorDiscovery';
+import {
+  appendPresetModel,
+  getSelectedModel,
+  parseModelId,
+  resolveDefaultModelId,
+} from '@/shared/lib/modelSelector';
+
+type MigrationHistoryComponent =
+  | 'user'
+  | 'assistant'
+  | 'system'
+  | 'tool'
+  | 'approval'
+  | 'error'
+  | 'summary'
+  | 'rawLog'
+  | 'thinking';
+
+type MigrationHistorySelection = Record<MigrationHistoryComponent, boolean>;
+
+const MIGRATION_HISTORY_OPTIONS: Array<{
+  key: MigrationHistoryComponent;
+  label: string;
+  required?: boolean;
+}> = [
+  { key: 'user', label: 'User messages', required: true },
+  { key: 'assistant', label: 'Assistant messages' },
+  { key: 'system', label: 'System messages' },
+  { key: 'tool', label: 'Tool calls and results' },
+  { key: 'approval', label: 'Approvals, feedback, and answers' },
+  { key: 'error', label: 'Errors' },
+  { key: 'summary', label: 'Summaries' },
+  { key: 'rawLog', label: 'Raw command logs' },
+  { key: 'thinking', label: 'AI thinking' },
+];
+
+const DEFAULT_MIGRATION_HISTORY_SELECTION: MigrationHistorySelection = {
+  user: true,
+  assistant: true,
+  system: false,
+  tool: false,
+  approval: false,
+  error: false,
+  summary: false,
+  rawLog: false,
+  thinking: false,
+};
+
+const TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4;
 
 /** Compute execution status from boolean flags */
 function computeExecutionStatus(params: {
@@ -84,6 +136,174 @@ function computeExecutionStatus(params: {
   if (params.isQueued) return 'queued';
   if (params.isAttemptRunning) return 'running';
   return 'idle';
+}
+
+function classifyHistoryEntry(
+  entry: PatchTypeWithKey
+): MigrationHistoryComponent | null {
+  if (entry.type === 'STDOUT' || entry.type === 'STDERR') return 'rawLog';
+  if (entry.type === 'DIFF') return 'tool';
+  if (entry.type !== 'NORMALIZED_ENTRY') return null;
+
+  switch (entry.content.entry_type.type) {
+    case 'user_message':
+      return 'user';
+    case 'assistant_message':
+      return 'assistant';
+    case 'system_message':
+      return 'system';
+    case 'tool_use':
+      return 'tool';
+    case 'user_feedback':
+    case 'user_answered_questions':
+      return 'approval';
+    case 'error_message':
+      return 'error';
+    case 'thinking':
+      return 'thinking';
+    case 'next_action':
+    case 'token_usage_info':
+      return 'summary';
+    case 'loading':
+      return null;
+  }
+}
+
+function formatHistoryEntry(entry: PatchTypeWithKey): string | null {
+  if (entry.type === 'STDOUT' || entry.type === 'STDERR') {
+    return `<log stream="${entry.type.toLowerCase()}">\n${entry.content.trim()}\n</log>`;
+  }
+
+  if (entry.type === 'DIFF') {
+    return `<tool>\n${JSON.stringify(entry.content, null, 2)}\n</tool>`;
+  }
+
+  if (entry.type !== 'NORMALIZED_ENTRY') return null;
+
+  const normalized = entry.content;
+  const entryType = normalized.entry_type;
+  const content = normalized.content.trim();
+
+  switch (entryType.type) {
+    case 'user_message':
+      return `<user>\n${content}\n</user>`;
+    case 'assistant_message':
+      return `<agent>\n${content}\n</agent>`;
+    case 'system_message':
+      return `<system>\n${content}\n</system>`;
+    case 'thinking':
+      return `<thinking>\n${content}\n</thinking>`;
+    case 'tool_use':
+      return [
+        `<tool name="${escapeXmlAttribute(entryType.tool_name)}">`,
+        `<status>${escapeXmlText(JSON.stringify(entryType.status))}</status>`,
+        `<action>${escapeXmlText(JSON.stringify(entryType.action_type, null, 2))}</action>`,
+        content ? `Content:\n${content}` : null,
+        '</tool>',
+      ]
+        .filter((line): line is string => Boolean(line))
+        .join('\n');
+    case 'user_feedback':
+      return `<approval type="feedback" denied_tool="${escapeXmlAttribute(entryType.denied_tool)}">\n${content}\n</approval>`;
+    case 'user_answered_questions':
+      return `<approval type="answers">\n${JSON.stringify(entryType.answers, null, 2)}${content ? `\n${content}` : ''}\n</approval>`;
+    case 'error_message':
+      return `<error type="${escapeXmlAttribute(JSON.stringify(entryType.error_type))}">\n${content}\n</error>`;
+    case 'next_action':
+      return `<summary>\n${content || JSON.stringify(entryType, null, 2)}\n</summary>`;
+    case 'token_usage_info':
+      return `<summary type="token_usage">\n${JSON.stringify(entryType, null, 2)}\n</summary>`;
+    case 'loading':
+      return null;
+  }
+}
+
+function escapeXmlText(value: string) {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function escapeXmlAttribute(value: string) {
+  return escapeXmlText(value).replace(/"/g, '&quot;');
+}
+
+function buildMigratedPrompt(
+  entries: PatchTypeWithKey[],
+  selection: MigrationHistorySelection,
+  userPrompt: string
+) {
+  const migratedEntries = entries
+    .filter((entry) => {
+      const component = classifyHistoryEntry(entry);
+      return component ? selection[component] : false;
+    })
+    .map(formatHistoryEntry)
+    .filter((entry): entry is string => Boolean(entry));
+
+  const migratedContext = migratedEntries.length
+    ? migratedEntries.join('\n\n')
+    : 'No previous transcript entries were selected.';
+
+  return [
+    'The following context was migrated from a previous Vibe Kanban session.',
+    '',
+    '<context>',
+    migratedContext,
+    '</context>',
+    '',
+    'Continue from that context and respond to this new prompt:',
+    '',
+    '<prompt>',
+    userPrompt.trim(),
+    '</prompt>',
+  ].join('\n');
+}
+
+function estimateTokenCount(text: string) {
+  return Math.max(1, Math.ceil(text.length / TOKEN_ESTIMATE_CHARS_PER_TOKEN));
+}
+
+function formatTokenCount(value: number) {
+  if (value >= 1_000_000) {
+    const formatted = value / 1_000_000;
+    return `${Number.isInteger(formatted) ? formatted.toFixed(0) : formatted.toFixed(1)}M`;
+  }
+  if (value >= 1_000) {
+    const formatted = value / 1_000;
+    return `${Number.isInteger(formatted) ? formatted.toFixed(0) : formatted.toFixed(1)}K`;
+  }
+  return value.toLocaleString();
+}
+
+type ModelInfoWithContextWindow = {
+  id: string;
+  name: string;
+  context_window?: number | null;
+  contextWindow?: number | null;
+  model_context_window?: number | null;
+  max_context_tokens?: number | null;
+};
+
+function inferKnownContextWindow(modelId: string, modelName: string) {
+  const value = `${modelId} ${modelName}`.toLowerCase();
+  if (value.includes('gemini') && value.includes('flash')) return 1_000_000;
+  if (value.includes('opus[1m]') || value.includes('1m context')) {
+    return 1_000_000;
+  }
+  return null;
+}
+
+function getModelContextWindow(model: ModelInfoWithContextWindow | null) {
+  if (!model) return null;
+  const explicit =
+    model.context_window ??
+    model.contextWindow ??
+    model.model_context_window ??
+    model.max_context_tokens;
+  if (typeof explicit === 'number' && explicit > 0) return explicit;
+  return inferKnownContextWindow(model.id, model.name);
 }
 
 /** Shared props across all modes */
@@ -172,6 +392,11 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
   const sessionId = session?.id;
   const queryClient = useQueryClient();
   const hostId = useHostId();
+  const [migrationHistorySelection, setMigrationHistorySelection] =
+    useState<MigrationHistorySelection>(DEFAULT_MIGRATION_HISTORY_SELECTION);
+  const [isMigratingToNewSession, setIsMigratingToNewSession] =
+    useState(false);
+  const [steerError, setSteerError] = useState<string | null>(null);
 
   const handleRenameSession = useCallback(
     (targetSessionId: string, currentName: string) => {
@@ -462,11 +687,225 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
     onPersist: (cfg) => void saveToScratch(localMessageRef.current, cfg),
   });
 
+  const currentSessionExecutor = useMemo(() => {
+    const value = session?.executor ?? latestConfig?.executor ?? null;
+    return value ? (value as BaseCodingAgent) : null;
+  }, [latestConfig?.executor, session?.executor]);
+
+  const isMigrationMode =
+    mode === 'existing-session' &&
+    !!currentSessionExecutor &&
+    !!effectiveExecutor &&
+    (isMigratingToNewSession || effectiveExecutor !== currentSessionExecutor);
+
+  useEffect(() => {
+    if (mode !== 'existing-session') {
+      setIsMigratingToNewSession(false);
+    }
+  }, [mode]);
+
+  const {
+    config: migrationStreamModelConfig,
+  } = useModelSelectorConfig(effectiveExecutor, {
+    workspaceId: sessionId ? workspaceId : undefined,
+    sessionId,
+  });
+
+  const targetModelContextWindow = useMemo(() => {
+    const modelConfig = appendPresetModel(
+      migrationStreamModelConfig,
+      presetOptions?.model_id
+    );
+    if (!modelConfig) return null;
+
+    const hasProviders = modelConfig.providers.length > 0;
+    const { providerId: configProviderId, modelId: configModelId } =
+      parseModelId(executorConfig?.model_id, hasProviders);
+    const { providerId: presetProviderId, modelId: presetModelId } =
+      parseModelId(presetOptions?.model_id, hasProviders);
+    const selectedProviderId =
+      configProviderId ?? presetProviderId ?? modelConfig.providers[0]?.id ?? null;
+    const selectedModelId =
+      configModelId ??
+      presetModelId ??
+      resolveDefaultModelId(
+        modelConfig.models,
+        selectedProviderId,
+        modelConfig.default_model,
+        hasProviders
+      );
+    const selectedModel = getSelectedModel(
+      modelConfig.models,
+      selectedProviderId,
+      selectedModelId
+    );
+
+    return getModelContextWindow(selectedModel);
+  }, [
+    executorConfig?.model_id,
+    migrationStreamModelConfig,
+    presetOptions?.model_id,
+  ]);
+
+  const migrationEntryCounts = useMemo(() => {
+    const counts: Record<MigrationHistoryComponent, number> = {
+      user: 0,
+      assistant: 0,
+      system: 0,
+      tool: 0,
+      approval: 0,
+      error: 0,
+      summary: 0,
+      rawLog: 0,
+      thinking: 0,
+    };
+
+    for (const entry of entries) {
+      const component = classifyHistoryEntry(entry);
+      if (component) counts[component] += 1;
+    }
+
+    return counts;
+  }, [entries]);
+
+  const handleMigrationHistorySelectionChange = useCallback(
+    (key: MigrationHistoryComponent, checked: boolean) => {
+      if (key === 'user') return;
+      setMigrationHistorySelection((current) => ({
+        ...current,
+        [key]: checked,
+      }));
+    },
+    []
+  );
+
+  const migrationPromptPreview = useMemo(() => {
+    const { prompt } = buildAgentPrompt(localMessage, [reviewMarkdown]);
+    return buildMigratedPrompt(entries, migrationHistorySelection, prompt);
+  }, [entries, localMessage, migrationHistorySelection, reviewMarkdown]);
+
+  const migrationEstimatedTokens = useMemo(
+    () => estimateTokenCount(migrationPromptPreview),
+    [migrationPromptPreview]
+  );
+
+  const migrationContextUsagePercent = targetModelContextWindow
+    ? Math.min(
+        100,
+        Math.round((migrationEstimatedTokens / targetModelContextWindow) * 100)
+      )
+    : null;
+
+  const handleMigrateToNewSession = useCallback(() => {
+    if (mode !== 'existing-session') return;
+    setIsMigratingToNewSession(true);
+  }, [mode]);
+
+  const migrationNotice = isMigrationMode ? (
+    <div className="px-double py-base space-y-base">
+      <div className="space-y-half">
+        <div className="text-sm font-medium text-normal">
+          Sending with{' '}
+          {effectiveExecutor
+            ? toPrettyCase(effectiveExecutor)
+            : 'another executor'}{' '}
+          will create a new session.
+        </div>
+        <div className="text-xs text-low">
+          Selected history will be copied into the new session, and your prompt
+          will be appended at the bottom.
+        </div>
+      </div>
+      <div className="space-y-half">
+        {targetModelContextWindow ? (
+          <div className="space-y-half">
+            <div className="relative h-5 overflow-hidden rounded-sm border border-border bg-secondary">
+              <div
+                className="h-full bg-brand/70"
+                style={{ width: `${migrationContextUsagePercent ?? 0}%` }}
+              />
+              <div className="absolute inset-0 flex items-center justify-center text-[11px] font-medium text-normal">
+                {migrationContextUsagePercent}% ·{' '}
+                {formatTokenCount(migrationEstimatedTokens)} /{' '}
+                {formatTokenCount(targetModelContextWindow)}
+              </div>
+            </div>
+            <div className="text-xs text-low">
+              Estimated migrated prompt size against the target model context.
+            </div>
+          </div>
+        ) : (
+          <div className="text-xs text-low">
+            Estimated migrated prompt size:{' '}
+            <span className="font-medium text-normal">
+              {formatTokenCount(migrationEstimatedTokens)} tokens
+            </span>
+            . Target context window is not known.
+          </div>
+        )}
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-double gap-y-half">
+        {MIGRATION_HISTORY_OPTIONS.map((option) => {
+          const count = migrationEntryCounts[option.key];
+          const disabled = option.required || count === 0;
+          return (
+            <label
+              key={option.key}
+              className="flex items-center gap-2 text-xs text-normal"
+            >
+              <Checkbox
+                checked={migrationHistorySelection[option.key]}
+                disabled={disabled}
+                onCheckedChange={(checked) =>
+                  handleMigrationHistorySelectionChange(option.key, checked)
+                }
+              />
+              <span className={count === 0 ? 'text-low' : undefined}>
+                {option.label}
+                <span className="text-low"> ({count})</span>
+              </span>
+            </label>
+          );
+        })}
+      </div>
+      <details className="rounded-sm border border-border bg-secondary/60">
+        <summary className="cursor-pointer px-base py-half text-xs font-medium text-normal">
+          Preview migrated prompt
+        </summary>
+        <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words border-t border-border px-base py-half text-[11px] leading-relaxed text-low">
+          {migrationPromptPreview}
+        </pre>
+      </details>
+    </div>
+  ) : null;
+
   const supportsContextUsage =
     !!effectiveExecutor &&
     capabilities?.[effectiveExecutor]?.includes(
       BaseAgentCapability.CONTEXT_USAGE
     );
+
+  const runningSteerableProcess = useMemo(() => {
+    return (
+      processes.find((process) => {
+        if (process.status !== ExecutionProcessStatus.running) return false;
+        const action = process.executor_action.typ;
+        const executor =
+          action.type === 'CodingAgentInitialRequest' ||
+          action.type === 'CodingAgentFollowUpRequest' ||
+          action.type === 'ReviewRequest'
+            ? action.executor_config.executor
+            : null;
+        return (
+          !!executor &&
+          capabilities?.[executor]?.includes(BaseAgentCapability.AGENT_STEERING)
+        );
+      }) ?? null
+    );
+  }, [capabilities, processes]);
+
+  const canSteerRunningAgent =
+    !!runningSteerableProcess && !isMigrationMode && !pendingApproval;
 
   // Navigate to agent settings to customise variants
   const handleCustomise = () => {
@@ -498,6 +937,16 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
     executorConfig,
   });
 
+  const steerMutation = useMutation({
+    mutationFn: ({
+      processId,
+      message,
+    }: {
+      processId: string;
+      message: string;
+    }) => executionProcessesApi.steerExecutionProcess(processId, message),
+  });
+
   const handleSend = useCallback(async () => {
     const { prompt, isSlashCommand } = buildAgentPrompt(localMessage, [
       reviewMarkdown,
@@ -505,12 +954,22 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
 
     onScrollToBottom('auto');
 
-    const success = await send(prompt);
+    const finalPrompt = isMigrationMode
+      ? buildMigratedPrompt(entries, migrationHistorySelection, prompt)
+      : prompt;
+    const success = await send(finalPrompt, {
+      createNewSession: isMigrationMode,
+      sessionName:
+        isMigrationMode && currentSessionExecutor && effectiveExecutor
+          ? `Migrated from ${toPrettyCase(currentSessionExecutor)} to ${toPrettyCase(effectiveExecutor)}`
+          : undefined,
+    });
     if (success) {
       cancelDebouncedSave();
       setLocalMessage('');
       clearUploadedAttachments();
-      if (isNewSessionMode) await clearDraft();
+      if (isNewSessionMode || isMigrationMode) await clearDraft();
+      if (isMigrationMode) setIsMigratingToNewSession(false);
       if (!isSlashCommand) {
         reviewContext?.clearComments();
       }
@@ -525,12 +984,57 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
     send,
     localMessage,
     reviewMarkdown,
+    isMigrationMode,
+    entries,
+    migrationHistorySelection,
+    currentSessionExecutor,
+    effectiveExecutor,
     cancelDebouncedSave,
     setLocalMessage,
     clearUploadedAttachments,
     isNewSessionMode,
     clearDraft,
+    setIsMigratingToNewSession,
     reviewContext,
+  ]);
+
+  const handleSteer = useCallback(async () => {
+    if (!runningSteerableProcess) return;
+    const { prompt, isSlashCommand } = buildAgentPrompt(localMessage, [
+      reviewMarkdown,
+    ]);
+    const trimmed = prompt.trim();
+    if (!trimmed) return;
+
+    try {
+      setSteerError(null);
+      await steerMutation.mutateAsync({
+        processId: runningSteerableProcess.id,
+        message: trimmed,
+      });
+      cancelDebouncedSave();
+      setLocalMessage('');
+      await clearDraft();
+      clearUploadedAttachments();
+      if (!isSlashCommand) {
+        reviewContext?.clearComments();
+      }
+      onScrollToBottom('auto');
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      setSteerError(`Failed to steer agent: ${err.message ?? 'Unknown error'}`);
+    }
+  }, [
+    runningSteerableProcess,
+    localMessage,
+    reviewMarkdown,
+    steerMutation,
+    cancelDebouncedSave,
+    setLocalMessage,
+    clearDraft,
+    clearUploadedAttachments,
+    reviewContext,
+    onScrollToBottom,
   ]);
 
   // Track previous process count for queue refresh
@@ -590,6 +1094,7 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
         setLocalMessage(value);
       }
       if (sendError) clearError();
+      if (steerError) setSteerError(null);
     },
     [
       isQueued,
@@ -598,6 +1103,7 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
       executorConfig,
       sendError,
       clearError,
+      steerError,
       setLocalMessage,
     ]
   );
@@ -882,7 +1388,7 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
     isInEditMode,
     isStopping,
     isQueueLoading,
-    isSendingFollowUp: isSending,
+    isSendingFollowUp: isSending || steerMutation.isPending,
     isQueued,
     isAttemptRunning,
   });
@@ -976,6 +1482,7 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
         }}
         actions={{
           onSend: () => {},
+          onSteer: () => {},
           onQueue: () => {},
           onCancelQueue: () => {},
           onStop: () => {},
@@ -1031,6 +1538,7 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
       }}
       actions={{
         onSend: handleSend,
+        onSteer: handleSteer,
         onQueue: handleQueueMessage,
         onCancelQueue: handleCancelQueue,
         onStop: stopExecution,
@@ -1042,10 +1550,16 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
         onSelectSession: onSelectSession ?? (() => {}),
         isNewSessionMode: needsExecutorSelection,
         onNewSession: onStartNewSession,
+        onMigrateToNewSession:
+          mode === 'existing-session' ? handleMigrateToNewSession : undefined,
         onRenameSession: handleRenameSession,
       }}
       toolbarActions={{
         items: toolbarActionItems,
+      }}
+      migrationMode={{
+        isActive: isMigrationMode,
+        notice: migrationNotice,
       }}
       onPrCommentClick={
         actionCtx.hasOpenPR ? handleInsertPrComments : undefined
@@ -1058,12 +1572,13 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
         conflictedFilesCount,
         onResolveConflicts: handleResolveConflicts,
       }}
-      error={sendError}
+      error={sendError ?? steerError}
+      canSteer={canSteerRunningAgent}
       agent={effectiveExecutor}
       todos={todos}
       inProgressTodo={inProgressTodo}
       executor={
-        needsExecutorSelection
+        effectiveExecutor
           ? {
               selected: effectiveExecutor,
               options: executorOptions,

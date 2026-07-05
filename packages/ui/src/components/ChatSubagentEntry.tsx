@@ -20,10 +20,18 @@ export interface ChatSubagentEntryRenderProps {
   workspaceId?: string;
 }
 
+export interface ChatSubagentDetails {
+  model?: string | null;
+  effort?: string | null;
+  prompt?: string | null;
+}
+
 interface ChatSubagentEntryProps {
   description: string;
   subagentType?: string | null;
+  details?: ChatSubagentDetails | null;
   result?: ChatSubagentResultLike | null;
+  fallbackContent?: string | null;
   expanded?: boolean;
   onToggle?: () => void;
   className?: string;
@@ -40,7 +48,9 @@ interface ChatSubagentEntryProps {
 export function ChatSubagentEntry({
   description,
   subagentType,
+  details,
   result,
+  fallbackContent,
   expanded = false,
   onToggle,
   className,
@@ -97,7 +107,10 @@ export function ChatSubagentEntry({
 
   // Extract the result content for display
   const resultContent = useMemo(() => {
-    if (!result?.value) return null;
+    if (result?.value == null) {
+      const fallback = fallbackContent?.trim();
+      return fallback || null;
+    }
 
     // Handle both string and object values
     if (typeof result.value === 'string') {
@@ -106,11 +119,25 @@ export function ChatSubagentEntry({
 
     // For JSON results, stringify with formatting
     return JSON.stringify(result.value, null, 2);
-  }, [result]);
+  }, [result, fallbackContent]);
+
+  const detailRows = useMemo(
+    () =>
+      [
+        { label: t('conversation.subagent.model'), value: details?.model },
+        { label: t('conversation.subagent.effort'), value: details?.effort },
+      ].filter(
+        (row): row is { label: string; value: string } =>
+          typeof row.value === 'string' && row.value.trim().length > 0
+      ),
+    [details?.effort, details?.model, t]
+  );
+  const prompt = details?.prompt?.trim() || null;
+  const hasDetails = detailRows.length > 0 || Boolean(prompt);
 
   // Determine if we have content to show
   const hasContent = Boolean(resultContent);
-  const isInteractive = Boolean(onToggle && hasContent);
+  const isInteractive = Boolean(onToggle && (hasContent || hasDetails));
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (!isInteractive || event.target !== event.currentTarget) return;
     if (event.key !== 'Enter' && event.key !== ' ') return;
@@ -167,15 +194,43 @@ export function ChatSubagentEntry({
         )}
       </div>
 
-      {/* Expanded content - shows subagent output */}
-      {expanded && hasContent && (
-        <div className="border-t p-double bg-panel/50">
-          <div className="text-xs font-medium text-low pb-base uppercase tracking-wide">
-            {t('conversation.output')}
-          </div>
-          <div className="prose prose-sm dark:prose-invert max-w-none">
-            {renderMarkdown({ content: resultContent!, workspaceId })}
-          </div>
+      {/* Expanded content - shows subagent launch details and output */}
+      {expanded && (hasDetails || hasContent) && (
+        <div className="border-t p-double bg-panel/50 space-y-double">
+          {hasDetails && (
+            <div className="space-y-base">
+              {detailRows.length > 0 && (
+                <dl className="grid grid-cols-[max-content_1fr] gap-x-double gap-y-small text-xs">
+                  {detailRows.map((row) => (
+                    <div key={row.label} className="contents">
+                      <dt className="text-low">{row.label}</dt>
+                      <dd className="text-normal break-words">{row.value}</dd>
+                    </div>
+                  ))}
+                </dl>
+              )}
+              {prompt && (
+                <div className="space-y-small">
+                  <div className="text-xs font-medium text-low uppercase tracking-wide">
+                    {t('conversation.subagent.prompt')}
+                  </div>
+                  <pre className="whitespace-pre-wrap break-words rounded-sm border bg-background/50 p-base text-xs text-normal font-mono">
+                    {prompt}
+                  </pre>
+                </div>
+              )}
+            </div>
+          )}
+          {hasContent && (
+            <div>
+              <div className="text-xs font-medium text-low pb-base uppercase tracking-wide">
+                {t('conversation.output')}
+              </div>
+              <div className="prose prose-sm dark:prose-invert max-w-none">
+                {renderMarkdown({ content: resultContent!, workspaceId })}
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>

@@ -76,7 +76,6 @@ impl LogWriter {
     }
 }
 
-#[derive(Clone)]
 pub(super) struct RunConfig {
     pub base_url: String,
     pub directory: String,
@@ -94,6 +93,7 @@ pub(super) struct RunConfig {
     pub commit_reminder: bool,
     pub commit_reminder_prompt: String,
     pub repo_context: RepoContext,
+    pub steering_rx: Option<mpsc::Receiver<String>>,
 }
 
 /// Generate a cryptographically secure random password for OpenCode server auth.
@@ -259,7 +259,7 @@ pub(super) async fn run_slash_command(
 }
 
 async fn run_session_inner(
-    config: RunConfig,
+    mut config: RunConfig,
     log_writer: LogWriter,
     client: reqwest::Client,
     cancel: CancellationToken,
@@ -313,6 +313,40 @@ async fn run_session_inner(
         },
         event_resp,
     ));
+    let steering_handle = config.steering_rx.take().map(|mut steering_rx| {
+        let client = client.clone();
+        let base_url = config.base_url.clone();
+        let directory = config.directory.clone();
+        let session_id = session_id.clone();
+        let model = model.clone();
+        let model_variant = config.model_variant.clone();
+        let agent = config.agent.clone();
+        let cancel = cancel.clone();
+
+        tokio::spawn(async move {
+            while let Some(message) = steering_rx.recv().await {
+                let prompt_fut = prompt(
+                    &client,
+                    &base_url,
+                    &directory,
+                    &session_id,
+                    &message,
+                    model.clone(),
+                    model_variant.clone(),
+                    agent.clone(),
+                );
+
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    result = prompt_fut => {
+                        if let Err(err) = result {
+                            tracing::warn!("failed to steer OpenCode process: {err}");
+                        }
+                    }
+                }
+            }
+        })
+    });
 
     let prompt_fut = Box::pin(prompt(
         &client,
@@ -335,12 +369,18 @@ async fn run_session_inner(
     if cancel.is_cancelled() {
         send_abort(&client, &config.base_url, &config.directory, &session_id).await;
         event_handle.abort();
+        if let Some(handle) = steering_handle {
+            handle.abort();
+        }
         return Ok(());
     }
 
     if let Err(err) = prompt_result {
         let _ = pending_approvals.wait(cancel.clone()).await;
         event_handle.abort();
+        if let Some(handle) = steering_handle {
+            handle.abort();
+        }
         return Err(err);
     }
 
@@ -391,6 +431,9 @@ async fn run_session_inner(
     }
 
     event_handle.abort();
+    if let Some(handle) = steering_handle {
+        handle.abort();
+    }
 
     log_writer.log_event(&OpencodeExecutorEvent::Done).await?;
 

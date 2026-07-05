@@ -52,7 +52,10 @@
       "todoOperation": "{{operation}} todos"
     },
     "subagent": {
-      "defaultType": "Subagent"
+      "defaultType": "Subagent",
+      "model": "Model",
+      "effort": "Effort",
+      "prompt": "Prompt"
     },
     "loadingEarlierMessages": "Loading earlier messages"
   },
@@ -87,6 +90,7 @@
     "description": "Sign in to join organizations and share tasks with your team",
     "continueWithGitHub": "Continue with GitHub",
     "continueWithGoogle": "Continue with Google",
+    "continueWithZoho": "Continue with Zoho",
     "waitingTitle": "Complete Authentication",
     "waitingDescription": "A popup window has been opened for authentication",
     "waitingForAuth": "Waiting for authentication...",

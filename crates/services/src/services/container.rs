@@ -759,6 +759,16 @@ pub trait ContainerService {
         status: ExecutionProcessStatus,
     ) -> Result<(), ContainerError>;
 
+    async fn steer_execution(
+        &self,
+        _execution_process: &ExecutionProcess,
+        _message: &str,
+    ) -> Result<(), ContainerError> {
+        Err(ContainerError::Other(anyhow!(
+            "Agent steering is not supported by this deployment"
+        )))
+    }
+
     async fn try_commit_changes(&self, ctx: &ExecutionContext) -> Result<bool, ContainerError>;
 
     async fn copy_project_files(

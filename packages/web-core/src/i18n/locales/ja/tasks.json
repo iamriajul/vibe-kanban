@@ -395,6 +395,7 @@
       "loading": "読み込み中",
       "send": "送信",
       "sending": "送信中",
+      "steer": "Steer",
       "queue": "キューに追加",
       "cancelQueue": "キューをキャンセル",
       "requestChanges": "変更を依頼",

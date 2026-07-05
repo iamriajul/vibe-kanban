@@ -51,6 +51,7 @@ export type ExecutionStatus =
 
 interface ActionsProps {
   onSend: () => void;
+  onSteer?: () => void;
   onQueue: () => void;
   onCancelQueue: () => void;
   onStop: () => void;
@@ -70,6 +71,7 @@ interface SessionProps<TExecutor extends string = string> {
   onSelectSession: (sessionId: string) => void;
   isNewSessionMode?: boolean;
   onNewSession?: () => void;
+  onMigrateToNewSession?: () => void;
   onRenameSession?: (sessionId: string, currentName: string) => void;
 }
 
@@ -84,6 +86,11 @@ export interface SessionToolbarActionItem {
 
 interface ToolbarActionsProps {
   items: SessionToolbarActionItem[];
+}
+
+interface MigrationModeProps {
+  isActive: boolean;
+  notice: ReactNode;
 }
 
 interface StatsProps {
@@ -168,6 +175,7 @@ interface SessionChatBoxProps<TExecutor extends string = string> {
   askQuestionMode?: AskQuestionModeProps;
   reviewComments?: ReviewCommentsProps;
   toolbarActions?: ToolbarActionsProps;
+  migrationMode?: MigrationModeProps;
   modelSelector?: ReactNode;
   error?: string | null;
   repoIds?: string[];
@@ -192,6 +200,7 @@ interface SessionChatBoxProps<TExecutor extends string = string> {
   getActiveTurnPatchKey?: () => string | null;
   tokenUsageInfo?: ContextUsageInfo | null;
   supportsContextUsage?: boolean;
+  canSteer?: boolean;
   dropzone?: DropzoneProps;
 }
 
@@ -233,6 +242,7 @@ export function SessionChatBox<TExecutor extends string = string>({
   askQuestionMode,
   reviewComments,
   toolbarActions,
+  migrationMode,
   modelSelector,
   error,
   repoIds,
@@ -254,6 +264,7 @@ export function SessionChatBox<TExecutor extends string = string>({
   getActiveTurnPatchKey,
   tokenUsageInfo,
   supportsContextUsage,
+  canSteer = false,
   dropzone,
 }: SessionChatBoxProps<TExecutor>) {
   const { t } = useTranslation('tasks');
@@ -286,8 +297,10 @@ export function SessionChatBox<TExecutor extends string = string>({
       approvalMode?.isSubmitting ||
       askQuestionMode?.isSubmitting
   );
+  const hasTextPrompt = editor.value.trim().length > 0;
   const hasContent =
-    editor.value.trim().length > 0 || (reviewComments?.count ?? 0) > 0;
+    hasTextPrompt ||
+    (!migrationMode?.isActive && (reviewComments?.count ?? 0) > 0);
   const canSend =
     hasContent && !['sending', 'stopping', 'queue-loading'].includes(status);
   const isQueued = status === 'queued';
@@ -332,7 +345,7 @@ export function SessionChatBox<TExecutor extends string = string>({
       feedbackMode?.onSubmitFeedback();
     } else if (isInEditMode && canSend) {
       editMode?.onSubmitEdit();
-    } else if (status === 'running' && canSend) {
+    } else if (status === 'running' && canSend && !migrationMode?.isActive) {
       actions.onQueue();
     } else if (status === 'idle' && canSend) {
       actions.onSend();
@@ -358,6 +371,7 @@ export function SessionChatBox<TExecutor extends string = string>({
     onSelectSession,
     isNewSessionMode,
     onNewSession,
+    onMigrateToNewSession,
     onRenameSession,
   } = session;
   const isLatestSelected =
@@ -521,8 +535,30 @@ export function SessionChatBox<TExecutor extends string = string>({
         );
 
       case 'running':
+        if (migrationMode?.isActive) {
+          return (
+            <>
+              <PrimaryButton disabled value={t('conversation.actions.send')} />
+              <PrimaryButton
+                onClick={actions.onStop}
+                variant="secondary"
+                value={t('conversation.actions.stop')}
+                actionIcon="spinner"
+              />
+            </>
+          );
+        }
+
         return (
           <>
+            {canSteer && (
+              <PrimaryButton
+                onClick={actions.onSteer}
+                disabled={!canSend || !actions.onSteer}
+                variant="secondary"
+                value={t('conversation.actions.steer')}
+              />
+            )}
             <PrimaryButton
               onClick={actions.onQueue}
               disabled={!canSend}
@@ -579,6 +615,15 @@ export function SessionChatBox<TExecutor extends string = string>({
   // Banner content
   const renderBanner = () => {
     const banners: ReactNode[] = [];
+
+    // Migration mode banner
+    if (migrationMode?.isActive) {
+      banners.push(
+        <div key="migration" className="border-b bg-accent/5">
+          {migrationMode.notice}
+        </div>
+      );
+    }
 
     // Review comments banner
     if (reviewComments && reviewComments.count > 0) {
@@ -674,8 +719,8 @@ export function SessionChatBox<TExecutor extends string = string>({
       modelSelector={modelSelector}
       headerLeft={
         <>
-          {/* New session mode: agent icon + executor dropdown */}
-          {isNewSessionMode && executor && (
+          {/* Executor dropdown */}
+          {executor && (
             <>
               {renderAgentIcon?.(agent, 'size-icon-xl')}
               <ToolbarDropdown
@@ -786,7 +831,7 @@ export function SessionChatBox<TExecutor extends string = string>({
       }
       headerRight={
         <>
-          {/* Turn navigation + Agent icon for existing session mode */}
+          {/* Turn navigation for existing session mode */}
           {!isNewSessionMode && (
             <>
               {onScrollToPreviousMessage && (
@@ -805,7 +850,6 @@ export function SessionChatBox<TExecutor extends string = string>({
                   />
                 </TurnNavigationPopup>
               )}
-              {renderAgentIcon?.(agent, 'size-icon-xl')}
             </>
           )}
           {/* Todo progress popup - always rendered, disabled when no todos */}
@@ -825,6 +869,11 @@ export function SessionChatBox<TExecutor extends string = string>({
             >
               {t('conversation.sessions.newSession')}
             </DropdownMenuItem>
+            {onMigrateToNewSession && !isNewSessionMode && (
+              <DropdownMenuItem icon={PlusIcon} onClick={onMigrateToNewSession}>
+                Migrate to New Session
+              </DropdownMenuItem>
+            )}
             {sessions.length > 0 && <DropdownMenuSeparator />}
             {sessions.length > 0 ? (
               <>

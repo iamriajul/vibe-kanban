@@ -31,7 +31,7 @@ import {
 } from './SettingsComponents';
 import { useSettingsDirty } from './SettingsDirtyContext';
 import { useSettingsMachineClient } from './SettingsHostContext';
-import { AgentIcon } from '@/shared/components/AgentIcon';
+import { AgentIcon, getAgentName } from '@/shared/components/AgentIcon';
 import { getExecutorVariantKeys } from '@/shared/lib/executor';
 
 type ExecutorsMap = Record<string, Record<string, Record<string, unknown>>>;
@@ -418,7 +418,7 @@ export function AgentsSettingsSection() {
                       )
                     }
                   >
-                    {toPrettyCase(executor)}
+                    {getAgentName(executor as BaseCodingAgent)}
                   </TwoColumnPickerItem>
                 );
               })}

@@ -1,14 +1,23 @@
 import {
   forwardRef,
   useCallback,
+  useDeferredValue,
   useEffect,
   useImperativeHandle,
   useMemo,
   useRef,
   useState,
+  type ChangeEvent,
+  type KeyboardEvent,
   type MouseEvent,
 } from 'react';
-import { SpinnerIcon } from '@phosphor-icons/react';
+import {
+  CaretDownIcon,
+  CaretUpIcon,
+  MagnifyingGlassIcon,
+  SpinnerIcon,
+  XIcon,
+} from '@phosphor-icons/react';
 import { useTranslation } from 'react-i18next';
 
 import {
@@ -40,10 +49,16 @@ import {
 import { useConversationHistory } from '../model/hooks/useConversationHistory';
 import { useSetTokenUsageInfo } from '../model/contexts/EntriesContext';
 import type { WorkspaceWithSession } from '@/shared/types/attempt';
-import type { RepoWithTargetBranch } from 'shared/types';
+import type {
+  ActionType,
+  NormalizedEntry,
+  RepoWithTargetBranch,
+} from 'shared/types';
 import { ChatEmptyState } from '@vibe/ui/components/ChatEmptyState';
 import { ChatScriptPlaceholder } from '@vibe/ui/components/ChatScriptPlaceholder';
 import { ScriptFixerDialog } from '@/shared/dialogs/scripts/ScriptFixerDialog';
+import { Button } from '@vibe/ui/components/Button';
+import { Input } from '@vibe/ui/components/Input';
 
 interface ConversationListProps {
   attempt: WorkspaceWithSession;
@@ -63,6 +78,111 @@ export interface ConversationListHandle {
 
 const ALWAYS_UNVIRTUALIZED_TAIL_ROWS = 8;
 const STREAMING_UNVIRTUALIZED_BUFFER_ROWS = 24;
+
+function stringifySearchValue(value: unknown): string {
+  if (value == null) return '';
+  if (typeof value === 'string') return value;
+  if (
+    typeof value === 'number' ||
+    typeof value === 'boolean' ||
+    typeof value === 'bigint'
+  ) {
+    return String(value);
+  }
+
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return '';
+  }
+}
+
+function getActionSearchText(action: ActionType): string {
+  switch (action.action) {
+    case 'file_read':
+      return action.path;
+    case 'file_edit':
+      return [
+        action.path,
+        ...action.changes.map((change) => stringifySearchValue(change)),
+      ].join(' ');
+    case 'command_run':
+      return [action.command, action.result?.output].filter(Boolean).join(' ');
+    case 'search':
+      return action.query;
+    case 'web_fetch':
+      return action.url;
+    case 'tool':
+      return [
+        action.tool_name,
+        stringifySearchValue(action.arguments),
+        stringifySearchValue(action.result?.value),
+      ].join(' ');
+    case 'task_create':
+      return [
+        action.description,
+        action.subagent_type,
+        action.prompt,
+        action.model,
+        action.effort,
+        stringifySearchValue(action.result?.value),
+      ].join(' ');
+    case 'plan_presentation':
+      return action.plan;
+    case 'todo_management':
+      return [
+        action.operation,
+        ...action.todos.map((todo) => stringifySearchValue(todo)),
+      ].join(' ');
+    case 'ask_user_question':
+      return action.questions
+        .map((question) => stringifySearchValue(question))
+        .join(' ');
+    case 'other':
+      return action.description;
+    default:
+      return '';
+  }
+}
+
+function getNormalizedEntrySearchText(entry: NormalizedEntry): string {
+  const entryType = entry.entry_type;
+
+  if (entryType.type !== 'tool_use') {
+    return [entryType.type, entry.content].join(' ');
+  }
+
+  return [
+    entryType.type,
+    entryType.tool_name,
+    getActionSearchText(entryType.action_type),
+    entry.content,
+  ].join(' ');
+}
+
+function getDisplayEntrySearchText(entry: DisplayEntry): string {
+  if (
+    entry.type === 'AGGREGATED_GROUP' ||
+    entry.type === 'AGGREGATED_DIFF_GROUP' ||
+    entry.type === 'AGGREGATED_THINKING_GROUP'
+  ) {
+    return entry.entries.map(getDisplayEntrySearchText).join(' ');
+  }
+
+  if (entry.type === 'NORMALIZED_ENTRY') {
+    return getNormalizedEntrySearchText(entry.content);
+  }
+
+  if (
+    entry.type === 'STDOUT' ||
+    entry.type === 'STDERR' ||
+    entry.type === 'DIFF'
+  ) {
+    return stringifySearchValue(entry.content);
+  }
+
+  return '';
+}
 
 function renderRowContent(
   entry: DisplayEntry,
@@ -161,6 +281,12 @@ export const ConversationList = forwardRef<
   const [hasSetupScriptRun, setHasSetupScriptRun] = useState(false);
   const [hasCleanupScriptRun, setHasCleanupScriptRun] = useState(false);
   const [hasRunningProcess, setHasRunningProcess] = useState(false);
+  const [isFinderOpen, setIsFinderOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [activeSearchMatchIndex, setActiveSearchMatchIndex] = useState(0);
+  const deferredSearchQuery = useDeferredValue(searchQuery);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const chatRootRef = useRef<HTMLDivElement | null>(null);
   const lastSettledTailStartIndexRef = useRef<number | null>(null);
   const { setEntries, reset } = useEntriesActions();
   const setTokenUsageInfo = useSetTokenUsageInfo();
@@ -244,6 +370,9 @@ export const ConversationList = forwardRef<
     setHasRunningProcess(false);
     setFilteredEntries([]);
     setDataVersion(0);
+    setIsFinderOpen(false);
+    setSearchQuery('');
+    setActiveSearchMatchIndex(0);
     lastSettledTailStartIndexRef.current = null;
     reset();
   }, [conversationScopeKey, reset]);
@@ -395,6 +524,39 @@ export const ConversationList = forwardRef<
     () => prevRowsRef.current,
     [filteredEntries]
   );
+
+  const normalizedSearchQuery = deferredSearchQuery.trim().toLowerCase();
+  const searchMatches = useMemo(() => {
+    if (!normalizedSearchQuery) return [];
+
+    return conversationRows
+      .map((row, index) => ({
+        index,
+        text: getDisplayEntrySearchText(row.entry).toLowerCase(),
+      }))
+      .filter((match) => match.text.includes(normalizedSearchQuery))
+      .map((match) => match.index);
+  }, [conversationRows, normalizedSearchQuery]);
+
+  const activeSearchRowIndex =
+    searchMatches.length > 0
+      ? searchMatches[
+          Math.min(activeSearchMatchIndex, searchMatches.length - 1)
+        ]
+      : null;
+  const searchMatchRowIndexes = useMemo(
+    () => new Set(searchMatches),
+    [searchMatches]
+  );
+
+  useEffect(() => {
+    setActiveSearchMatchIndex(0);
+  }, [normalizedSearchQuery]);
+
+  useEffect(() => {
+    if (activeSearchMatchIndex < searchMatches.length) return;
+    setActiveSearchMatchIndex(Math.max(0, searchMatches.length - 1));
+  }, [activeSearchMatchIndex, searchMatches.length]);
 
   const hasActiveStreamingTurn = useMemo(
     () =>
@@ -548,6 +710,125 @@ export const ConversationList = forwardRef<
     scrollToAbsoluteIndex,
   });
   scrollOnEntriesChangedRef.current = scrollExecutor.onEntriesChanged;
+
+  useEffect(() => {
+    if (!isFinderOpen || activeSearchRowIndex == null || !normalizedSearchQuery)
+      return;
+    conversationVirtualizer.releaseBottomLock();
+    programmaticScrollDeadlineRef.current = performance.now() + 1000;
+    scrollToAbsoluteIndex(activeSearchRowIndex, 'center', 'smooth');
+  }, [
+    activeSearchRowIndex,
+    conversationVirtualizer,
+    isFinderOpen,
+    normalizedSearchQuery,
+    scrollToAbsoluteIndex,
+  ]);
+
+  useEffect(() => {
+    if (!isFinderOpen) return;
+
+    requestAnimationFrame(() => {
+      searchInputRef.current?.focus();
+      searchInputRef.current?.select();
+    });
+  }, [isFinderOpen]);
+
+  const closeFinder = useCallback(() => {
+    setIsFinderOpen(false);
+    setSearchQuery('');
+    setActiveSearchMatchIndex(0);
+    chatRootRef.current?.focus({ preventScroll: true });
+  }, []);
+
+  useEffect(() => {
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (
+        !(event.metaKey || event.ctrlKey) ||
+        event.key.toLowerCase() !== 'f'
+      ) {
+        return;
+      }
+
+      const target = event.target;
+      if (
+        target instanceof HTMLElement &&
+        (target.isContentEditable ||
+          target.closest('input, textarea, [role="textbox"]'))
+      ) {
+        return;
+      }
+
+      const chatRoot = chatRootRef.current;
+      if (
+        !chatRoot ||
+        !(target instanceof Node) ||
+        !chatRoot.contains(target)
+      ) {
+        return;
+      }
+
+      event.preventDefault();
+      setIsFinderOpen(true);
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+  const goToSearchMatch = useCallback(
+    (direction: 1 | -1) => {
+      if (searchMatches.length === 0) return;
+      setActiveSearchMatchIndex((current) => {
+        const next = current + direction;
+        if (next < 0) return searchMatches.length - 1;
+        if (next >= searchMatches.length) return 0;
+        return next;
+      });
+    },
+    [searchMatches.length]
+  );
+
+  const handleSearchChange = useCallback(
+    (event: ChangeEvent<HTMLInputElement>) => {
+      setSearchQuery(event.target.value);
+    },
+    []
+  );
+
+  const handleSearchKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLInputElement>) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        goToSearchMatch(event.shiftKey ? -1 : 1);
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        closeFinder();
+      }
+    },
+    [closeFinder, goToSearchMatch]
+  );
+
+  const handleConversationPointerDownCapture = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      if (
+        target.closest(
+          'button, input, textarea, select, a, summary, [role="button"], [role="textbox"], [contenteditable="true"]'
+        )
+      ) {
+        return;
+      }
+
+      chatRootRef.current?.focus({ preventScroll: true });
+    },
+    []
+  );
+
+  const handleFinderClose = useCallback(() => {
+    closeFinder();
+  }, [closeFinder]);
 
   // Determine if there are entries to show placeholders
   const hasEntries = conversationRows.length > 0;
@@ -754,7 +1035,77 @@ export const ConversationList = forwardRef<
 
   return (
     <ApprovalFormProvider>
-      <div className="relative h-full overflow-hidden">
+      <div
+        ref={chatRootRef}
+        tabIndex={-1}
+        className="relative h-full overflow-hidden focus:outline-none"
+        onPointerDownCapture={handleConversationPointerDownCapture}
+      >
+        {isFinderOpen && hasEntries && (
+          <div className="absolute right-3 top-3 z-20 flex items-center gap-1 rounded-md border border-border bg-background/95 px-2 py-1 shadow-sm backdrop-blur">
+            <MagnifyingGlassIcon className="size-4 text-low" weight="bold" />
+            <Input
+              ref={searchInputRef}
+              value={searchQuery}
+              onChange={handleSearchChange}
+              onKeyDown={handleSearchKeyDown}
+              placeholder={t('conversation.searchPlaceholder', {
+                defaultValue: 'Search chat history',
+              })}
+              className="h-7 w-44 border-0 px-1 py-0 text-xs focus-visible:ring-0"
+              aria-label={t('conversation.searchLabel', {
+                defaultValue: 'Search chat history',
+              })}
+            />
+            {normalizedSearchQuery && (
+              <span className="min-w-12 text-center text-xs tabular-nums text-low">
+                {searchMatches.length > 0
+                  ? `${Math.min(activeSearchMatchIndex + 1, searchMatches.length)}/${searchMatches.length}`
+                  : t('conversation.searchNoResults', {
+                      defaultValue: '0/0',
+                    })}
+              </span>
+            )}
+            <Button
+              type="button"
+              variant="icon"
+              size="icon"
+              className="h-7 w-7"
+              disabled={searchMatches.length === 0}
+              onClick={() => goToSearchMatch(-1)}
+              aria-label={t('conversation.searchPrevious', {
+                defaultValue: 'Previous search result',
+              })}
+            >
+              <CaretUpIcon className="size-4" weight="bold" />
+            </Button>
+            <Button
+              type="button"
+              variant="icon"
+              size="icon"
+              className="h-7 w-7"
+              disabled={searchMatches.length === 0}
+              onClick={() => goToSearchMatch(1)}
+              aria-label={t('conversation.searchNext', {
+                defaultValue: 'Next search result',
+              })}
+            >
+              <CaretDownIcon className="size-4" weight="bold" />
+            </Button>
+            <Button
+              type="button"
+              variant="icon"
+              size="icon"
+              className="h-7 w-7"
+              onClick={handleFinderClose}
+              aria-label={t('conversation.searchClear', {
+                defaultValue: 'Close search',
+              })}
+            >
+              <XIcon className="size-4" weight="bold" />
+            </Button>
+          </div>
+        )}
         {showLoader && (
           <div className="absolute inset-0 flex items-center justify-center z-10">
             <SpinnerIcon className="size-6 animate-spin text-low" />
@@ -832,7 +1183,20 @@ export const ConversationList = forwardRef<
                     data-index={virtualItem.index}
                     data-row-index={virtualItem.index}
                     data-semantic-key={row.semanticKey}
+                    data-search-match={
+                      searchMatchRowIndexes.has(virtualItem.index) || undefined
+                    }
+                    data-search-active={
+                      activeSearchRowIndex === virtualItem.index || undefined
+                    }
                     ref={measureElement}
+                    className={
+                      activeSearchRowIndex === virtualItem.index
+                        ? 'bg-yellow-500/10 outline outline-1 outline-yellow-500/50'
+                        : searchMatchRowIndexes.has(virtualItem.index)
+                          ? 'bg-yellow-500/5'
+                          : undefined
+                    }
                     style={{
                       position: 'absolute',
                       top: 0,
@@ -855,6 +1219,19 @@ export const ConversationList = forwardRef<
                 key={row.semanticKey}
                 data-row-index={rowIndex}
                 data-semantic-key={row.semanticKey}
+                data-search-match={
+                  searchMatchRowIndexes.has(rowIndex) || undefined
+                }
+                data-search-active={
+                  activeSearchRowIndex === rowIndex || undefined
+                }
+                className={
+                  activeSearchRowIndex === rowIndex
+                    ? 'bg-yellow-500/10 outline outline-1 outline-yellow-500/50'
+                    : searchMatchRowIndexes.has(rowIndex)
+                      ? 'bg-yellow-500/5'
+                      : undefined
+                }
               >
                 {renderRowContent(row.entry, attempt, resetAction, repos)}
               </div>

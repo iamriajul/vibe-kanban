@@ -11,6 +11,7 @@ import {
 import { useTranslation } from 'react-i18next';
 import { cn } from '../lib/cn';
 import { RunningDots } from './RunningDots';
+import { UserAvatar, type UserAvatarUser } from './UserAvatar';
 
 const formatRelativeElapsed = (dateString: string): string => {
   const date = new Date(dateString);
@@ -42,6 +43,8 @@ export interface WorkspaceSummaryProps {
   latestProcessCompletedAt?: string;
   latestProcessStatus?: 'running' | 'completed' | 'failed' | 'killed';
   prStatus?: 'open' | 'merged' | 'closed' | 'unknown';
+  /** Owner profile for displaying creator avatar (shown when viewing other users' workspaces) */
+  owner?: UserAvatarUser | null;
   onClick?: () => void;
   className?: string;
   summary?: boolean;
@@ -64,6 +67,7 @@ export function WorkspaceSummary({
   hasUnseenActivity = false,
   latestProcessCompletedAt,
   latestProcessStatus,
+  owner,
   prStatus,
   onClick,
   className,
@@ -108,7 +112,7 @@ export function WorkspaceSummary({
       >
         <div
           className={cn(
-            'overflow-hidden whitespace-nowrap pr-double',
+            'flex items-center gap-half overflow-hidden whitespace-nowrap pr-double',
             !summary && 'text-normal'
           )}
           style={{
@@ -118,7 +122,10 @@ export function WorkspaceSummary({
               'linear-gradient(to right, black calc(100% - 24px), transparent 100%)',
           }}
         >
-          {name}
+          {owner && (
+            <UserAvatar user={owner} className="!size-4 !text-[8px]" />
+          )}
+          <span className="truncate">{name}</span>
         </div>
         {(!summary || isActive) && (
           <div className="flex w-full items-center gap-base text-sm h-5">

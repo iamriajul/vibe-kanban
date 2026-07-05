@@ -44,6 +44,7 @@
     try {
       var u = new URL(url);
       u.searchParams.delete('_refresh');
+      u.searchParams.delete('__vk_port');
       return u.toString();
     } catch (e) {
       return url;

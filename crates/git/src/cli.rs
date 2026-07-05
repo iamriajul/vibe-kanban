@@ -342,6 +342,36 @@ impl GitCli {
         self.git(worktree_path, ["commit", "-m", message])?;
         Ok(())
     }
+
+    /// Commit staged changes while overriding author/committer identity.
+    pub fn commit_with_identity(
+        &self,
+        worktree_path: &Path,
+        message: &str,
+        name: &str,
+        email: &str,
+    ) -> Result<(), GitCliError> {
+        let envs = vec![
+            (
+                OsString::from("GIT_AUTHOR_NAME"),
+                OsString::from(name.to_string()),
+            ),
+            (
+                OsString::from("GIT_AUTHOR_EMAIL"),
+                OsString::from(email.to_string()),
+            ),
+            (
+                OsString::from("GIT_COMMITTER_NAME"),
+                OsString::from(name.to_string()),
+            ),
+            (
+                OsString::from("GIT_COMMITTER_EMAIL"),
+                OsString::from(email.to_string()),
+            ),
+        ];
+        self.git_with_env(worktree_path, ["commit", "-m", message], &envs)?;
+        Ok(())
+    }
     /// Fetch a branch to the given remote using native git authentication.
     pub fn fetch_with_refspec(
         &self,

@@ -395,6 +395,7 @@
       "loading": "Cargando",
       "send": "Enviar",
       "sending": "Enviando",
+      "steer": "Steer",
       "queue": "Poner en cola",
       "cancelQueue": "Cancelar cola",
       "requestChanges": "Solicitar cambios",

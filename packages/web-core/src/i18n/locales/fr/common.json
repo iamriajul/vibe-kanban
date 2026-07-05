@@ -47,7 +47,10 @@
       "todoOperation": "{{operation}} tâches à faire"
     },
     "subagent": {
-      "defaultType": "Sous-agent"
+      "defaultType": "Sous-agent",
+      "model": "Modèle",
+      "effort": "Effort",
+      "prompt": "Prompt"
     },
     "loadingEarlierMessages": "Chargement des messages pr\u00e9c\u00e9dents"
   },
@@ -83,6 +86,7 @@
     "description": "Connectez-vous pour rejoindre des organisations et partager des tâches avec votre équipe",
     "continueWithGitHub": "Continuer avec GitHub",
     "continueWithGoogle": "Continuer avec Google",
+    "continueWithZoho": "Continuer avec Zoho",
     "waitingTitle": "Terminer l'authentification",
     "waitingDescription": "Une fenêtre popup a été ouverte pour l'authentification",
     "waitingForAuth": "En attente de l'authentification...",

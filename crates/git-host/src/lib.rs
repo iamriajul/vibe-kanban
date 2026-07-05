@@ -3,6 +3,7 @@ mod types;
 
 pub mod azure;
 pub mod github;
+pub mod gitlab;
 
 use std::path::Path;
 
@@ -14,7 +15,7 @@ pub use types::{
     PullRequestDetail, ReviewCommentUser, UnifiedPrComment,
 };
 
-use self::{azure::AzureDevOpsProvider, github::GitHubProvider};
+use self::{azure::AzureDevOpsProvider, github::GitHubProvider, gitlab::GitLabProvider};
 
 #[async_trait]
 #[enum_dispatch(GitHostService)]
@@ -55,6 +56,7 @@ pub trait GitHostProvider: Send + Sync {
 pub enum GitHostService {
     GitHub(GitHubProvider),
     AzureDevOps(AzureDevOpsProvider),
+    GitLab(GitLabProvider),
 }
 
 impl GitHostService {
@@ -62,6 +64,7 @@ impl GitHostService {
         match detect_provider_from_url(url) {
             ProviderKind::GitHub => Ok(Self::GitHub(GitHubProvider::new()?)),
             ProviderKind::AzureDevOps => Ok(Self::AzureDevOps(AzureDevOpsProvider::new()?)),
+            ProviderKind::GitLab => Ok(Self::GitLab(GitLabProvider::new()?)),
             ProviderKind::Unknown => Err(GitHostError::UnsupportedProvider),
         }
     }

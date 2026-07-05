@@ -810,6 +810,20 @@ export const executionProcessesApi = {
     );
     return handleApiResponse<void>(response);
   },
+
+  steerExecutionProcess: async (
+    processId: string,
+    message: string
+  ): Promise<void> => {
+    const response = await makeRequest(
+      `/api/execution-processes/${processId}/steer`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ message }),
+      }
+    );
+    return handleApiResponse<void>(response);
+  },
 };
 
 // File System APIs

@@ -1,40 +1,22 @@
-import https from 'https';
 import fs from 'fs';
 import path from 'path';
-import crypto from 'crypto';
 import os from 'os';
+import { createRequire } from 'module';
 
-// Replaced during npm pack by workflow
-export const R2_BASE_URL = '__R2_PUBLIC_URL__';
-export const BINARY_TAG = '__BINARY_TAG__'; // e.g., v0.0.135-20251215122030
+export const BINARY_TAG = require('../package.json').version as string;
 export const CACHE_DIR = path.join(os.homedir(), '.vibe-kanban', 'bin');
+const requireFromHere = createRequire(__filename);
+const OPTIONAL_BINARY_PACKAGES: Record<string, string> = {
+  'linux-x64': 'vibe-kanban-team-linux-x64',
+  'macos-arm64': 'vibe-kanban-team-macos-arm64',
+};
 
-// Local development mode: use binaries from npx-cli/dist/ instead of R2
+// Local development mode: use binaries from npx-cli/dist/
 // Only activate if dist/ exists (i.e., running from source after local-build.sh)
 export const LOCAL_DIST_DIR = path.join(__dirname, '..', 'dist');
 export const LOCAL_DEV_MODE =
   fs.existsSync(LOCAL_DIST_DIR) ||
   process.env.VIBE_KANBAN_LOCAL === '1';
-
-export interface BinaryInfo {
-  sha256: string;
-  size: number;
-}
-
-export interface BinaryManifest {
-  latest?: string;
-  platforms: Record<string, Record<string, BinaryInfo>>;
-}
-
-export interface DesktopPlatformInfo {
-  file: string;
-  sha256: string;
-  type: string | null;
-}
-
-export interface DesktopManifest {
-  platforms: Record<string, DesktopPlatformInfo>;
-}
 
 export interface DesktopBundleInfo {
   archivePath: string | null;
@@ -44,118 +26,34 @@ export interface DesktopBundleInfo {
 
 type ProgressCallback = (downloaded: number, total: number) => void;
 
-function fetchJson<T>(url: string): Promise<T> {
-  return new Promise((resolve, reject) => {
-    https
-      .get(url, (res) => {
-        if (res.statusCode === 301 || res.statusCode === 302) {
-          return fetchJson<T>(res.headers.location!)
-            .then(resolve)
-            .catch(reject);
-        }
-        if (res.statusCode !== 200) {
-          return reject(new Error(`HTTP ${res.statusCode} fetching ${url}`));
-        }
-        let data = '';
-        res.on('data', (chunk: string) => (data += chunk));
-        res.on('end', () => {
-          try {
-            resolve(JSON.parse(data) as T);
-          } catch {
-            reject(new Error(`Failed to parse JSON from ${url}`));
-          }
-        });
-      })
-      .on('error', reject);
-  });
-}
+function resolveVendoredBinaryZip(
+  platform: string,
+  binaryName: string
+): string | null {
+  const packageName = OPTIONAL_BINARY_PACKAGES[platform];
+  if (!packageName) return null;
 
-function downloadFile(
-  url: string,
-  destPath: string,
-  expectedSha256: string | undefined,
-  onProgress?: ProgressCallback
-): Promise<string> {
-  const tempPath = destPath + '.tmp';
-  return new Promise((resolve, reject) => {
-    const file = fs.createWriteStream(tempPath);
-    const hash = crypto.createHash('sha256');
-
-    const cleanup = () => {
-      try {
-        fs.unlinkSync(tempPath);
-      } catch {}
-    };
-
-    https
-      .get(url, (res) => {
-        if (res.statusCode === 301 || res.statusCode === 302) {
-          file.close();
-          cleanup();
-          return downloadFile(
-            res.headers.location!,
-            destPath,
-            expectedSha256,
-            onProgress
-          )
-            .then(resolve)
-            .catch(reject);
-        }
-
-        if (res.statusCode !== 200) {
-          file.close();
-          cleanup();
-          return reject(
-            new Error(`HTTP ${res.statusCode} downloading ${url}`)
-          );
-        }
-
-        const totalSize = parseInt(
-          res.headers['content-length'] || '0',
-          10
-        );
-        let downloadedSize = 0;
-
-        res.on('data', (chunk: Buffer) => {
-          downloadedSize += chunk.length;
-          hash.update(chunk);
-          if (onProgress) onProgress(downloadedSize, totalSize);
-        });
-        res.pipe(file);
-
-        file.on('finish', () => {
-          file.close();
-          const actualSha256 = hash.digest('hex');
-          if (expectedSha256 && actualSha256 !== expectedSha256) {
-            cleanup();
-            reject(
-              new Error(
-                `Checksum mismatch: expected ${expectedSha256}, got ${actualSha256}`
-              )
-            );
-          } else {
-            try {
-              fs.renameSync(tempPath, destPath);
-              resolve(destPath);
-            } catch (err) {
-              cleanup();
-              reject(err);
-            }
-          }
-        });
-      })
-      .on('error', (err) => {
-        file.close();
-        cleanup();
-        reject(err);
-      });
-  });
+  try {
+    const packageJsonPath = requireFromHere.resolve(
+      `${packageName}/package.json`
+    );
+    const packageRoot = path.dirname(packageJsonPath);
+    const zipPath = path.join(
+      packageRoot,
+      'dist',
+      platform,
+      `${binaryName}.zip`
+    );
+    return fs.existsSync(zipPath) ? zipPath : null;
+  } catch {
+    return null;
+  }
 }
 
 export async function ensureBinary(
   platform: string,
   binaryName: string,
-  onProgress?: ProgressCallback
+  _onProgress?: ProgressCallback
 ): Promise<string> {
   // In local dev mode, use binaries directly from npx-cli/dist/
   if (LOCAL_DEV_MODE) {
@@ -173,28 +71,18 @@ export async function ensureBinary(
     );
   }
 
-  const cacheDir = path.join(CACHE_DIR, BINARY_TAG, platform);
-  const zipPath = path.join(cacheDir, `${binaryName}.zip`);
-
-  if (fs.existsSync(zipPath)) return zipPath;
-
-  fs.mkdirSync(cacheDir, { recursive: true });
-
-  const manifest = await fetchJson<BinaryManifest>(
-    `${R2_BASE_URL}/binaries/${BINARY_TAG}/manifest.json`
+  const vendoredZipPath = resolveVendoredBinaryZip(
+    platform,
+    binaryName
   );
-  const binaryInfo = manifest.platforms?.[platform]?.[binaryName];
-
-  if (!binaryInfo) {
-    throw new Error(
-      `Binary ${binaryName} not available for ${platform}`
-    );
+  if (vendoredZipPath) {
+    return vendoredZipPath;
   }
 
-  const url = `${R2_BASE_URL}/binaries/${BINARY_TAG}/${platform}/${binaryName}.zip`;
-  await downloadFile(url, zipPath, binaryInfo.sha256, onProgress);
-
-  return zipPath;
+  throw new Error(
+    `Binary ${binaryName} not available for ${platform}. ` +
+      `Install the npm package with optional dependencies enabled.`
+  );
 }
 
 export const DESKTOP_CACHE_DIR = path.join(
@@ -205,7 +93,7 @@ export const DESKTOP_CACHE_DIR = path.join(
 
 export async function ensureDesktopBundle(
   tauriPlatform: string,
-  onProgress?: ProgressCallback
+  _onProgress?: ProgressCallback
 ): Promise<DesktopBundleInfo> {
   // In local dev mode, use Tauri bundle from npx-cli/dist/tauri/<platform>/
   if (LOCAL_DEV_MODE) {
@@ -227,49 +115,7 @@ export async function ensureDesktopBundle(
     );
   }
 
-  const cacheDir = path.join(
-    DESKTOP_CACHE_DIR,
-    BINARY_TAG,
-    tauriPlatform
+  throw new Error(
+    `Desktop app is not available from the npm package for ${tauriPlatform}.`
   );
-
-  // Check if already installed (sentinel file from previous run)
-  const sentinelPath = path.join(cacheDir, '.installed');
-  if (fs.existsSync(sentinelPath)) {
-    return { dir: cacheDir, archivePath: null, type: null };
-  }
-
-  fs.mkdirSync(cacheDir, { recursive: true });
-
-  // Fetch the desktop manifest
-  const manifest = await fetchJson<DesktopManifest>(
-    `${R2_BASE_URL}/binaries/${BINARY_TAG}/tauri/desktop-manifest.json`
-  );
-  const platformInfo = manifest.platforms?.[tauriPlatform];
-  if (!platformInfo) {
-    throw new Error(
-      `Desktop app not available for platform: ${tauriPlatform}`
-    );
-  }
-
-  const destPath = path.join(cacheDir, platformInfo.file);
-
-  // Skip download if file already exists (e.g. previous failed install)
-  if (!fs.existsSync(destPath)) {
-    const url = `${R2_BASE_URL}/binaries/${BINARY_TAG}/tauri/${tauriPlatform}/${platformInfo.file}`;
-    await downloadFile(url, destPath, platformInfo.sha256, onProgress);
-  }
-
-  return {
-    archivePath: destPath,
-    dir: cacheDir,
-    type: platformInfo.type,
-  };
-}
-
-export async function getLatestVersion(): Promise<string | undefined> {
-  const manifest = await fetchJson<BinaryManifest>(
-    `${R2_BASE_URL}/binaries/manifest.json`
-  );
-  return manifest.latest;
 }

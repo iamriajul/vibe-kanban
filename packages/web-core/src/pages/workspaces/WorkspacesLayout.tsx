@@ -33,6 +33,8 @@ import { CreateChatBoxContainer } from '@/shared/components/CreateChatBoxContain
 import { PreviewBrowserContainer } from './PreviewBrowserContainer';
 import { WorkspacesGuideDialog } from '@/shared/dialogs/shared/WorkspacesGuideDialog';
 import { useUserSystem } from '@/shared/hooks/useUserSystem';
+import { useAuth } from '@/shared/hooks/auth/useAuth';
+import { LoginRequiredPrompt } from '@/shared/dialogs/shared/LoginRequiredPrompt';
 
 import {
   PERSIST_KEYS,
@@ -110,6 +112,7 @@ export function WorkspacesLayout() {
   const isMobile = useIsMobile();
   const [mobileTab] = useMobileActiveTab();
   const mainContainerRef = useRef<WorkspacesMainContainerHandle>(null);
+  const { isSignedIn, isLoaded: authLoaded } = useAuth();
 
   const handleScrollToBottom = useCallback(
     (behavior: 'auto' | 'smooth' = 'smooth') => {
@@ -137,15 +140,18 @@ export function WorkspacesLayout() {
 
   const {
     config,
+    sharedApiBase,
     updateAndSaveConfig,
-    loading: configLoading,
+    loading: systemLoading,
   } = useUserSystem();
+  const requiresWorkspacesAuth = Boolean(sharedApiBase);
   const hasAutoShownWorkspacesGuide = useRef(false);
 
   // Auto-show Workspaces Guide on first visit
   useEffect(() => {
     if (hasAutoShownWorkspacesGuide.current) return;
-    if (configLoading || !config) return;
+    if (requiresWorkspacesAuth && !isSignedIn) return;
+    if (systemLoading || !config) return;
 
     const seenFeatures = config.showcases?.seen_features ?? [];
     if (seenFeatures.includes(WORKSPACES_GUIDE_ID)) return;
@@ -156,7 +162,13 @@ export function WorkspacesLayout() {
       showcases: { seen_features: [...seenFeatures, WORKSPACES_GUIDE_ID] },
     });
     WorkspacesGuideDialog.show().finally(() => WorkspacesGuideDialog.hide());
-  }, [configLoading, config, updateAndSaveConfig]);
+  }, [
+    requiresWorkspacesAuth,
+    isSignedIn,
+    systemLoading,
+    config,
+    updateAndSaveConfig,
+  ]);
 
   // Ensure left panels visible when right main panel hidden
   useEffect(() => {
@@ -203,6 +215,22 @@ export function WorkspacesLayout() {
     },
     [isLeftMainPanelVisible, rightMainPanelMode, setRightMainPanelSize]
   );
+
+  if (requiresWorkspacesAuth && (!authLoaded || systemLoading)) {
+    return (
+      <div className="flex items-center justify-center h-full w-full">
+        <p className="text-low">{t('states.loading')}</p>
+      </div>
+    );
+  }
+
+  if (requiresWorkspacesAuth && !isSignedIn) {
+    return (
+      <div className="flex items-center justify-center h-full w-full p-base">
+        <LoginRequiredPrompt className="max-w-md" />
+      </div>
+    );
+  }
 
   // ── Mobile layout ──────────────────────────────────────────────────
   // Uses `hidden` CSS class (NOT conditional rendering) to preserve

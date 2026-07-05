@@ -15,9 +15,9 @@ use codex_app_server_protocol::{
     DynamicToolCallResponse, FileChangeApprovalDecision, FileChangeRequestApprovalResponse,
     GetAccountParams, GetAccountRateLimitsResponse, GetAccountResponse, InitializeCapabilities,
     InitializeParams, InitializeResponse, ItemCompletedNotification, JSONRPCError,
-    JSONRPCNotification, JSONRPCRequest, JSONRPCResponse, ListMcpServerStatusParams,
-    ListMcpServerStatusResponse, McpServerStatusDetail, RequestId, ReviewStartParams,
-    ReviewStartResponse, ReviewTarget, ServerRequest, ThreadCompactStartParams,
+    JSONRPCErrorError, JSONRPCNotification, JSONRPCRequest, JSONRPCResponse,
+    ListMcpServerStatusParams, ListMcpServerStatusResponse, McpServerStatusDetail, RequestId,
+    ReviewStartParams, ReviewStartResponse, ReviewTarget, ServerRequest, ThreadCompactStartParams,
     ThreadCompactStartResponse, ThreadForkParams, ThreadForkResponse, ThreadItem, ThreadReadParams,
     ThreadReadResponse, ThreadStartParams, ThreadStartResponse, ToolRequestUserInputAnswer,
     ToolRequestUserInputQuestion, ToolRequestUserInputResponse, TurnCompletedNotification,
@@ -439,6 +439,19 @@ impl AppServerClient {
                 };
                 peer.send(&response).await
             }
+            ServerRequest::AttestationGenerate { request_id, .. } => {
+                tracing::warn!("received unsupported attestation request");
+                let response = JSONRPCError {
+                    id: request_id,
+                    error: JSONRPCErrorError {
+                        code: -32000,
+                        message: "attestation generation is not supported by this client"
+                            .to_string(),
+                        data: None,
+                    },
+                };
+                peer.send(&response).await
+            }
             ServerRequest::ApplyPatchApproval { .. }
             | ServerRequest::ExecCommandApproval { .. } => {
                 tracing::error!(
@@ -804,8 +817,24 @@ impl AppServerClient {
         });
     }
 
-    fn spawn_user_message(&self, thread_id: String, message: String) {
+    pub fn spawn_user_message(&self, thread_id: String, message: String) {
         self.spawn_turn_start(thread_id, message, None);
+    }
+
+    pub async fn steer(&self, message: String) -> Result<(), ExecutorError> {
+        let message = message.trim();
+        if message.is_empty() {
+            return Ok(());
+        }
+
+        let Some(thread_id) = self.thread_id.lock().await.clone() else {
+            return Err(ExecutorError::Io(io::Error::other(
+                "Codex thread is not ready for steering",
+            )));
+        };
+
+        self.spawn_user_message(thread_id, message.to_string());
+        Ok(())
     }
 }
 

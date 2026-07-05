@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
 
 use axum::{
     Router,
@@ -87,8 +87,17 @@ async fn terminal_ws(
         }
     }
 
+    let git_identity = deployment.current_git_identity().await;
+
     Ok(ws.on_upgrade(move |socket| {
-        handle_terminal_ws(socket, deployment, working_dir, query.cols, query.rows)
+        handle_terminal_ws(
+            socket,
+            deployment,
+            working_dir,
+            query.cols,
+            query.rows,
+            git_identity,
+        )
     }))
 }
 
@@ -98,10 +107,11 @@ async fn handle_terminal_ws(
     working_dir: PathBuf,
     cols: u16,
     rows: u16,
+    git_identity: Option<(String, String)>,
 ) {
     let (session_id, mut output_rx) = match deployment
         .pty()
-        .create_session(working_dir, cols, rows)
+        .create_session(working_dir, cols, rows, git_identity)
         .await
     {
         Ok(result) => result,
@@ -114,6 +124,9 @@ async fn handle_terminal_ws(
 
     let pty_service = deployment.pty().clone();
     let session_id_for_input = session_id;
+
+    let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
+    ping_interval.tick().await; // skip first immediate tick
 
     loop {
         tokio::select! {
@@ -157,6 +170,11 @@ async fn handle_terminal_ws(
                         tracing::warn!("terminal WS receive error: {}", error);
                         break;
                     }
+                }
+            }
+            _ = ping_interval.tick() => {
+                if socket.send(Message::Ping(vec![].into())).await.is_err() {
+                    break;
                 }
             }
         }

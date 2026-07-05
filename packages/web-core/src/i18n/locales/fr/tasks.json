@@ -138,6 +138,7 @@
       "loading": "Chargement",
       "send": "Envoyer",
       "sending": "Envoi en cours",
+      "steer": "Steer",
       "queue": "File d'attente",
       "cancelQueue": "Annuler la file",
       "requestChanges": "Demander des modifications",

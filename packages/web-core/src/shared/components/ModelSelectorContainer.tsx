@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
+  BrainIcon,
   CheckIcon,
   FastForwardIcon,
   GearIcon,
@@ -35,6 +36,7 @@ import { useUserSystem } from '@/shared/hooks/useUserSystem';
 import { getResolvedTheme, useTheme } from '@/shared/hooks/useTheme';
 import { useModelSelectorConfig } from '@/shared/hooks/useExecutorDiscovery';
 import { ModelSelectorPopover } from '@vibe/ui/components/ModelSelectorPopover';
+import { cn } from '@vibe/ui/lib/cn';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -55,6 +57,80 @@ interface ModelSelectorContainerProps {
   onOverrideChange: (partial: Partial<ExecutorConfig>) => void;
   executorConfig: ExecutorConfig | null;
   presetOptions: ExecutorConfig | null | undefined;
+}
+
+interface EffortQuickSelectorProps {
+  options: ModelInfo['reasoning_options'];
+  selectedReasoningId: string | null;
+  onSelect: (reasoningId: string) => void;
+}
+
+function EffortQuickSelector({
+  options,
+  selectedReasoningId,
+  onSelect,
+}: EffortQuickSelectorProps) {
+  if (!options.length) return null;
+
+  const selectedOption =
+    options.find((option) => option.id === selectedReasoningId) ?? options[0];
+
+  return (
+    <>
+      <div
+        className={cn(
+          'hidden md:inline-flex h-cta min-w-0 items-center rounded-sm border border-border',
+          'bg-secondary p-[2px]'
+        )}
+        aria-label="Effort"
+      >
+        {options.map((option) => {
+          const isSelected = option.id === selectedReasoningId;
+          return (
+            <button
+              key={option.id}
+              type="button"
+              onClick={() => onSelect(option.id)}
+              title={`Effort: ${option.label}`}
+              aria-pressed={isSelected}
+              className={cn(
+                'h-full min-w-8 max-w-[76px] rounded-[2px] px-half text-xs font-medium',
+                'truncate transition-colors',
+                'focus:outline-none focus-visible:ring-1 focus-visible:ring-brand',
+                isSelected
+                  ? 'bg-primary text-high shadow-sm'
+                  : 'text-low hover:bg-primary/70 hover:text-normal'
+              )}
+            >
+              {option.label}
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="md:hidden">
+        <DropdownMenu>
+          <DropdownMenuTriggerButton
+            size="sm"
+            icon={BrainIcon}
+            label={selectedOption?.label ?? 'Effort'}
+          />
+          <DropdownMenuContent align="start">
+            <DropdownMenuLabel>Effort</DropdownMenuLabel>
+            {options.map((option) => (
+              <DropdownMenuItem
+                key={option.id}
+                icon={option.id === selectedReasoningId ? CheckIcon : undefined}
+                onClick={() => onSelect(option.id)}
+              >
+                {option.label}
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+    </>
+  );
 }
 
 export function ModelSelectorContainer({
@@ -241,6 +317,31 @@ export function ModelSelectorContainer({
   const pendingModelRef = useRef<ModelInfo | null>(null);
   const pendingReasoningRef = useRef<string | null>(null);
 
+  const saveRecentReasoningSelection = useCallback(
+    (reasoningId: string | null, modelOverride?: ModelInfo | null) => {
+      const model = modelOverride ?? selectedModel;
+      if (!profiles || !agent || !reasoningId || !model) return;
+
+      const nextProfiles = setRecentReasoning(
+        profiles,
+        agent,
+        model,
+        reasoningId
+      );
+
+      if (nextProfiles !== profiles) {
+        setProfiles(nextProfiles);
+        void profilesApi
+          .save(JSON.stringify({ executors: nextProfiles }, null, 2))
+          .catch((error) => {
+            console.error('Failed to save recent reasoning', error);
+            void reloadSystem();
+          });
+      }
+    },
+    [agent, profiles, reloadSystem, selectedModel, setProfiles]
+  );
+
   const persistPendingSelections = useCallback(() => {
     if (!profiles || !agent) return;
     if (!pendingModelRef.current && !pendingReasoningRef.current) return;
@@ -323,6 +424,12 @@ export function ModelSelectorContainer({
   const handleReasoningSelect = (reasoningId: string | null) => {
     onOverrideChange({ reasoning_id: reasoningId });
     pendingReasoningRef.current = reasoningId;
+  };
+
+  const handleQuickReasoningSelect = (reasoningId: string) => {
+    onOverrideChange({ reasoning_id: reasoningId });
+    pendingReasoningRef.current = null;
+    saveRecentReasoningSelection(reasoningId);
   };
 
   const handleAgentSelect = (id: string | null) => {
@@ -416,9 +523,12 @@ export function ModelSelectorContainer({
   const modelLabelBase = loadingModels
     ? loadingLabel
     : (displaySelectedModel?.name ?? selectedModelId ?? defaultLabel);
-  const modelLabel = reasoningLabel
-    ? `${modelLabelBase} · ${reasoningLabel}`
-    : modelLabelBase;
+  const quickReasoningOptions = displaySelectedModel?.reasoning_options ?? [];
+  const modelLabel = quickReasoningOptions.length
+    ? modelLabelBase
+    : reasoningLabel
+      ? `${modelLabelBase} · ${reasoningLabel}`
+      : modelLabelBase;
 
   const agentLabel = selectedAgentId
     ? (config.agents.find((entry) => entry.id === selectedAgentId)?.label ??
@@ -466,33 +576,43 @@ export function ModelSelectorContainer({
       </DropdownMenu>
 
       {showModelSelector && (
-        <ModelSelectorPopover
-          isOpen={isOpen}
-          onOpenChange={handleOpenChange}
-          trigger={
-            <DropdownMenuTriggerButton
-              size="sm"
-              label={modelLabel}
-              disabled={loadingModels}
+        <>
+          <ModelSelectorPopover
+            isOpen={isOpen}
+            onOpenChange={handleOpenChange}
+            trigger={
+              <DropdownMenuTriggerButton
+                size="sm"
+                label={modelLabel}
+                disabled={loadingModels}
+                className="max-w-[220px]"
+              />
+            }
+            config={config}
+            error={streamError}
+            selectedProviderId={selectedProviderId}
+            selectedModelId={selectedModelId}
+            selectedReasoningId={selectedReasoningId}
+            searchQuery={searchQuery}
+            onSearchChange={setSearchQuery}
+            onModelSelect={handleModelSelect}
+            onReasoningSelect={handleReasoningSelect}
+            recentModelEntries={recentModelEntries}
+            showDefaultOption={showDefaultOption}
+            onSelectDefault={() => handleModelSelect(null)}
+            scrollRef={scrollRef}
+            expandedProviderId={expandedProviderId}
+            onExpandedProviderIdChange={setExpandedProviderId}
+            resolvedTheme={resolvedTheme}
+          />
+          {quickReasoningOptions.length > 0 && !loadingModels && (
+            <EffortQuickSelector
+              options={quickReasoningOptions}
+              selectedReasoningId={selectedReasoningId}
+              onSelect={handleQuickReasoningSelect}
             />
-          }
-          config={config}
-          error={streamError}
-          selectedProviderId={selectedProviderId}
-          selectedModelId={selectedModelId}
-          selectedReasoningId={selectedReasoningId}
-          searchQuery={searchQuery}
-          onSearchChange={setSearchQuery}
-          onModelSelect={handleModelSelect}
-          onReasoningSelect={handleReasoningSelect}
-          recentModelEntries={recentModelEntries}
-          showDefaultOption={showDefaultOption}
-          onSelectDefault={() => handleModelSelect(null)}
-          scrollRef={scrollRef}
-          expandedProviderId={expandedProviderId}
-          onExpandedProviderIdChange={setExpandedProviderId}
-          resolvedTheme={resolvedTheme}
-        />
+          )}
+        </>
       )}
 
       {permissionPolicy && config.permissions.length > 0 && (

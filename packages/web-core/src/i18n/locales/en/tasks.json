@@ -83,7 +83,11 @@
   },
   "diff": {
     "filesChanged_one": "{{count}} file changed",
-    "filesChanged_other": "{{count}} files changed"
+    "filesChanged_other": "{{count}} files changed",
+    "markdownPreview": {
+      "showPreview": "Show markdown preview",
+      "showDiff": "Show code diff"
+    }
   },
   "processes": {
     "noLogsAvailable": "No logs available",
@@ -138,6 +142,7 @@
       "loading": "Loading",
       "send": "Send",
       "sending": "Sending",
+      "steer": "Steer",
       "queue": "Queue",
       "cancelQueue": "Cancel Queue",
       "requestChanges": "Request Changes",

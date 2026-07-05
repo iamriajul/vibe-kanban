@@ -21,6 +21,7 @@ import { ActionsProvider } from '@/shared/providers/ActionsProvider';
 import { useWorkspaceContext } from '@/shared/hooks/useWorkspaceContext';
 import { useUserSystem } from '@/shared/hooks/useUserSystem';
 import { SharedAppLayout } from '@/shared/components/ui-new/containers/SharedAppLayout';
+import { AppWorkspaceAttentionNotifications } from '@/shared/notifications/AppWorkspaceAttentionNotifications';
 
 function KeyboardShortcutsHandler() {
   useKeyShowHelp(
@@ -85,6 +86,7 @@ function ExecutionProcessesProviderWrapper({
 function AppRouteProviders({ children }: { children: ReactNode }) {
   return (
     <HostIdProvider>
+      <AppWorkspaceAttentionNotifications />
       <WorkspaceProvider>
         <ExecutionProcessesProviderWrapper>
           <LogsPanelProvider>

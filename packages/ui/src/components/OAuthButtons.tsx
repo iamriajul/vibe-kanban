@@ -3,8 +3,9 @@ import { SpinnerIcon } from '@phosphor-icons/react';
 import { GitHubDark } from 'developer-icons';
 import { useTranslation } from 'react-i18next';
 import { GoogleLogo } from './GoogleLogo';
+import { ZohoLogo } from './ZohoLogo';
 
-export type OAuthProvider = 'github' | 'google';
+export type OAuthProvider = 'github' | 'google' | 'zoho';
 
 interface OAuthSignInButtonProps {
   provider: OAuthProvider;
@@ -23,6 +24,10 @@ const providerConfig = {
   google: {
     i18nKey: 'oauth.continueWithGoogle' as const,
     icon: () => <GoogleLogo className="size-5" />,
+  },
+  zoho: {
+    i18nKey: 'oauth.continueWithZoho' as const,
+    icon: () => <ZohoLogo className="size-5" />,
   },
 };
 

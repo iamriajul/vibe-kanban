@@ -51,6 +51,8 @@ pub enum RemoteClientError {
     Storage(String),
     #[error("invalid access token: {0}")]
     Token(String),
+    #[error("token refresh timed out")]
+    TokenRefreshTimeout,
 }
 
 impl RemoteClientError {
@@ -143,6 +145,7 @@ pub struct RemoteClient {
     base: Url,
     http: Client,
     auth_context: AuthContext,
+    session_id: Option<String>,
 }
 
 impl std::fmt::Debug for RemoteClient {
@@ -161,6 +164,7 @@ impl Clone for RemoteClient {
             base: self.base.clone(),
             http: self.http.clone(),
             auth_context: self.auth_context.clone(),
+            session_id: self.session_id.clone(),
         }
     }
 }
@@ -168,6 +172,7 @@ impl Clone for RemoteClient {
 impl RemoteClient {
     const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
     const TOKEN_REFRESH_LEEWAY_SECS: i64 = 20;
+    const TOKEN_REFRESH_REQUEST_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
     pub fn new(base_url: &str, auth_context: AuthContext) -> Result<Self, RemoteClientError> {
         let base = Url::parse(base_url).map_err(|e| RemoteClientError::Url(e.to_string()))?;
@@ -187,7 +192,13 @@ impl RemoteClient {
             base,
             http,
             auth_context,
+            session_id: None,
         })
+    }
+
+    pub fn with_session_id(mut self, session_id: Option<String>) -> Self {
+        self.session_id = session_id;
+        self
     }
 
     /// Returns a valid access token, refreshing when it's about to expire.
@@ -197,10 +208,11 @@ impl RemoteClient {
         Box<dyn std::future::Future<Output = Result<String, RemoteClientError>> + Send + '_>,
     > {
         Box::pin(async move {
+            let session_id = self.session_id.as_deref();
             let leeway = ChronoDuration::seconds(Self::TOKEN_REFRESH_LEEWAY_SECS);
             let creds = self
                 .auth_context
-                .get_credentials()
+                .get_credentials_for(session_id)
                 .await
                 .ok_or(RemoteClientError::Auth)?;
 
@@ -211,11 +223,12 @@ impl RemoteClient {
             }
 
             let refreshed = {
-                let _refresh_guard = self.auth_context.refresh_guard().await;
+                let _refresh_guard = self.auth_context.refresh_guard_for(session_id).await;
                 let latest = self
                     .auth_context
-                    .get_credentials()
+                    .reload_credentials_for(session_id)
                     .await
+                    .map_err(|e| RemoteClientError::Storage(e.to_string()))?
                     .ok_or(RemoteClientError::Auth)?;
                 if let Some(token) = latest.access_token.as_ref()
                     && !latest.expires_soon(leeway)
@@ -224,31 +237,55 @@ impl RemoteClient {
                     return Ok(token.clone());
                 }
 
-                self.refresh_credentials(&latest).await
+                let refresh_token = latest.refresh_token.clone();
+                match self.refresh_credentials(session_id, &latest).await {
+                    Err(err) if err.is_definitive_auth_failure() => {
+                        let reloaded = self
+                            .auth_context
+                            .reload_credentials_for(session_id)
+                            .await
+                            .map_err(|e| RemoteClientError::Storage(e.to_string()))?
+                            .ok_or(RemoteClientError::Auth)?;
+
+                        if reloaded.refresh_token != refresh_token {
+                            if let Some(token) = reloaded.access_token.as_ref()
+                                && !reloaded.expires_soon(leeway)
+                            {
+                                self.auth_context.clear_remote_auth_degraded_slug().await;
+                                return Ok(token.clone());
+                            }
+
+                            self.refresh_credentials(session_id, &reloaded).await
+                        } else {
+                            Err(err)
+                        }
+                    }
+                    result => result,
+                }
             };
 
             match refreshed {
-                Ok(updated) => {
-                    self.auth_context.clear_remote_auth_degraded_slug().await;
-                    updated.access_token.ok_or(RemoteClientError::Auth)
+                Ok(updated) => updated.access_token.ok_or(RemoteClientError::Auth),
+                Err(RemoteClientError::Auth) => {
+                    let _ = self.auth_context.clear_credentials_for(session_id).await;
+                    Err(RemoteClientError::Auth)
                 }
-                Err(err) if err.is_definitive_auth_failure() => {
-                    let _ = self.auth_context.clear_credentials().await;
-                    self.auth_context.clear_remote_auth_degraded_slug().await;
-                    Err(err)
+                Err(RemoteClientError::TokenRefreshTimeout) => {
+                    tracing::error!(
+                        "Refresh token request timed out after {} minutes. Discarding the refresh token and forcing re-login.",
+                        Self::TOKEN_REFRESH_REQUEST_TIMEOUT.as_secs() / 60
+                    );
+                    let _ = self.auth_context.clear_credentials_for(session_id).await;
+                    Err(RemoteClientError::TokenRefreshTimeout)
                 }
-                Err(err) => {
-                    if let Some(slug) = err.degraded_slug() {
-                        self.auth_context.set_remote_auth_degraded_slug(slug).await;
-                    }
-                    Err(err)
-                }
+                Err(e) => Err(e),
             }
         })
     }
 
     async fn refresh_credentials(
         &self,
+        session_id: Option<&str>,
         creds: &Credentials,
     ) -> Result<Credentials, RemoteClientError> {
         let response = self.refresh_token_request(&creds.refresh_token).await?;
@@ -262,7 +299,7 @@ impl RemoteClient {
             expires_at: Some(expires_at),
         };
         self.auth_context
-            .save_credentials(&new_creds)
+            .save_credentials_for(session_id, &new_creds)
             .await
             .map_err(|e| RemoteClientError::Storage(e.to_string()))?;
         self.auth_context.clear_remote_auth_degraded_slug().await;

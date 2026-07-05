@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::Type;
 use strum_macros::{Display, EnumDiscriminants, EnumString, VariantNames};
 use thiserror::Error;
-use tokio::task::JoinHandle;
+use tokio::{sync::mpsc, task::JoinHandle};
 use ts_rs::TS;
 use workspace_utils::msg_store::MsgStore;
 
@@ -22,8 +22,9 @@ use crate::{
     command::CommandBuildError,
     env::ExecutionEnv,
     executors::{
-        amp::Amp, claude::ClaudeCode, codex::Codex, copilot::Copilot, cursor::CursorAgent,
-        droid::Droid, gemini::Gemini, opencode::Opencode, qwen::QwenCode,
+        amp::Amp, antigravity::AntiGravity, claude::ClaudeCode, codex::Codex, copilot::Copilot,
+        cursor::CursorAgent, droid::Droid, gemini::Gemini, kimi::KimiCode, opencode::Opencode,
+        qwen::QwenCode,
     },
     logs::utils::patch,
     mcp_config::McpConfig,
@@ -32,12 +33,14 @@ use crate::{
 
 pub mod acp;
 pub mod amp;
+pub mod antigravity;
 pub mod claude;
 pub mod codex;
 pub mod copilot;
 pub mod cursor;
 pub mod droid;
 pub mod gemini;
+pub mod kimi;
 pub mod opencode;
 #[cfg(feature = "qa-mode")]
 pub mod qa_mock;
@@ -57,6 +60,8 @@ pub struct SlashCommandDescription {
 #[ts(use_ts_enum)]
 pub enum BaseAgentCapability {
     SessionFork,
+    /// Agent can accept new user guidance while an execution process is still running.
+    AgentSteering,
     /// Agent requires a setup script before it can run (e.g., login, installation)
     SetupHelper,
     /// Agent reports context/token usage information
@@ -117,6 +122,14 @@ pub enum CodingAgent {
     #[strum_discriminants(strum(serialize = "CURSOR", serialize = "CURSOR_AGENT"))]
     CursorAgent,
     QwenCode,
+    KimiCode,
+    #[serde(rename = "ANTIGRAVITY")]
+    #[strum(serialize = "ANTIGRAVITY")]
+    #[strum_discriminants(serde(rename = "ANTIGRAVITY"))]
+    #[strum_discriminants(strum(serialize = "ANTIGRAVITY"))]
+    #[strum_discriminants(ts(rename = "ANTIGRAVITY"))]
+    #[strum_discriminants(sqlx(rename = "ANTIGRAVITY"))]
+    AntiGravity,
     Copilot,
     Droid,
     #[cfg(feature = "qa-mode")]
@@ -178,20 +191,31 @@ impl CodingAgent {
         match self {
             Self::ClaudeCode(_) => vec![
                 BaseAgentCapability::SessionFork,
+                BaseAgentCapability::AgentSteering,
                 BaseAgentCapability::ContextUsage,
             ],
             Self::Opencode(_) => vec![
                 BaseAgentCapability::SessionFork,
+                BaseAgentCapability::AgentSteering,
                 BaseAgentCapability::ContextUsage,
             ],
             Self::Codex(_) => vec![
                 BaseAgentCapability::SessionFork,
+                BaseAgentCapability::AgentSteering,
                 BaseAgentCapability::SetupHelper,
                 BaseAgentCapability::ContextUsage,
             ],
             Self::Gemini(_) | Self::QwenCode(_) => {
                 vec![BaseAgentCapability::SessionFork]
             }
+            Self::KimiCode(_) => vec![
+                BaseAgentCapability::SessionFork,
+                BaseAgentCapability::ContextUsage,
+            ],
+            Self::AntiGravity(_) => vec![
+                BaseAgentCapability::SessionFork,
+                BaseAgentCapability::ContextUsage,
+            ],
             Self::CursorAgent(_) => vec![BaseAgentCapability::SetupHelper],
             Self::Amp(_) | Self::Copilot(_) | Self::Droid(_) => vec![],
             #[cfg(feature = "qa-mode")]
@@ -319,6 +343,8 @@ pub type ExecutorExitSignal = tokio::sync::oneshot::Receiver<ExecutorExitResult>
 /// When cancelled, the executor should attempt to cancel gracefully before being killed.
 pub type CancellationToken = tokio_util::sync::CancellationToken;
 
+pub type SteeringSender = mpsc::Sender<String>;
+
 #[derive(Debug)]
 pub struct SpawnedChild {
     pub child: AsyncGroupChild,
@@ -326,6 +352,8 @@ pub struct SpawnedChild {
     pub exit_signal: Option<ExecutorExitSignal>,
     /// Container → Executor: signals when container wants to cancel the execution
     pub cancel: Option<CancellationToken>,
+    /// Container → Executor: sends live user guidance to a running agent.
+    pub steering: Option<SteeringSender>,
 }
 
 impl From<AsyncGroupChild> for SpawnedChild {
@@ -334,6 +362,7 @@ impl From<AsyncGroupChild> for SpawnedChild {
             child,
             exit_signal: None,
             cancel: None,
+            steering: None,
         }
     }
 }

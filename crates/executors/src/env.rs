@@ -128,6 +128,7 @@ impl ExecutionEnv {
         for (key, value) in &self.vars {
             command.env(key, value);
         }
+        command.env_remove("XDG_DATA_HOME");
     }
 
     pub fn contains_key(&self, key: &str) -> bool {

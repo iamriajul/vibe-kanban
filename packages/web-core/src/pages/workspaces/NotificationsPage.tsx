@@ -1,7 +1,9 @@
-import { useCallback } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from '@tanstack/react-router';
 import { BellIcon, CheckIcon, ChecksIcon } from '@phosphor-icons/react';
 import { UserAvatar } from '@vibe/ui/components/UserAvatar';
+import { useAuth } from '@/shared/hooks/auth/useAuth';
+import { useBrowserNotificationPreference } from '@/shared/hooks/useBrowserNotificationPreference';
 import { useNotifications } from '@/shared/hooks/useNotifications';
 import { useNotificationMembers } from '@/shared/hooks/useNotificationMembers';
 import type { GroupedNotification } from '@/shared/lib/notifications';
@@ -9,6 +11,12 @@ import {
   getGroupedNotificationSegments,
   type MessageSegment,
 } from '@/shared/lib/notificationMessage';
+import {
+  getBrowserNotificationPermission,
+  requestBrowserNotificationPermission,
+  type BrowserNotificationPermission,
+} from '@/shared/lib/browserNotifications';
+import { playWorkspaceAttentionNotificationSoundPreview } from '@/shared/lib/workspaceAttentionNotifications';
 import { formatRelativeTime } from '@/shared/lib/date';
 import { cn } from '@/shared/lib/utils';
 
@@ -58,9 +66,22 @@ function NotificationMessage({
 
 export function NotificationsPage() {
   const router = useRouter();
+  const { userId } = useAuth();
   const { data, updateMany, enabled, unseenCount, groupedNotifications } =
     useNotifications();
   const { membersByUserId } = useNotificationMembers(data);
+  const {
+    enabled: browserNotificationsEnabled,
+    setEnabled: setBrowserNotificationsEnabled,
+  } = useBrowserNotificationPreference(userId);
+  const [browserPermission, setBrowserPermission] =
+    useState<BrowserNotificationPermission>(() =>
+      getBrowserNotificationPermission()
+    );
+
+  useEffect(() => {
+    setBrowserPermission(getBrowserNotificationPermission());
+  }, []);
 
   const markGroupSeen = useCallback(
     (group: GroupedNotification) => {
@@ -95,105 +116,153 @@ export function NotificationsPage() {
     updateMany(unseen.map((n) => ({ id: n.id, changes: { seen: true } })));
   }, [data, updateMany]);
 
-  if (!enabled) {
-    return (
-      <div className="flex items-center justify-center h-full text-low">
-        Sign in to view notifications
-      </div>
-    );
-  }
+  const handleBrowserNotificationsClick = useCallback(async () => {
+    if (browserNotificationsEnabled) {
+      setBrowserNotificationsEnabled(false);
+      return;
+    }
+
+    playWorkspaceAttentionNotificationSoundPreview();
+
+    const permission =
+      browserPermission === 'granted'
+        ? browserPermission
+        : await requestBrowserNotificationPermission();
+
+    setBrowserPermission(permission);
+    setBrowserNotificationsEnabled(permission === 'granted');
+  }, [
+    browserNotificationsEnabled,
+    browserPermission,
+    setBrowserNotificationsEnabled,
+  ]);
+
+  const browserNotificationLabel = browserNotificationsEnabled
+    ? 'Disable browser notifications'
+    : 'Enable browser notifications';
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
       <div className="flex items-center justify-between px-double py-base border-b border-border">
         <h1 className="text-xl font-medium text-high">Notifications</h1>
-        {unseenCount > 0 && (
-          <button
-            type="button"
-            onClick={handleMarkAllSeen}
-            className="flex items-center gap-1 px-base py-half text-sm text-low hover:text-normal transition-colors cursor-pointer"
-          >
-            <ChecksIcon size={16} />
-            Mark all as read
-          </button>
-        )}
+        <div className="flex items-center gap-half">
+          {browserPermission !== 'unsupported' && (
+            <button
+              type="button"
+              onClick={handleBrowserNotificationsClick}
+              disabled={browserPermission === 'denied'}
+              className={cn(
+                'flex items-center gap-1 px-base py-half text-sm text-low hover:text-normal transition-colors cursor-pointer',
+                'disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:text-low'
+              )}
+              title={
+                browserPermission === 'denied'
+                  ? 'Browser notifications are blocked in this browser'
+                  : browserNotificationLabel
+              }
+            >
+              <BellIcon size={16} />
+              <span className="hidden sm:inline">
+                {browserPermission === 'denied'
+                  ? 'Notifications blocked'
+                  : browserNotificationLabel}
+              </span>
+            </button>
+          )}
+          {unseenCount > 0 && (
+            <button
+              type="button"
+              onClick={handleMarkAllSeen}
+              className="flex items-center gap-1 px-base py-half text-sm text-low hover:text-normal transition-colors cursor-pointer"
+            >
+              <ChecksIcon size={16} />
+              <span className="hidden sm:inline">Mark all as read</span>
+            </button>
+          )}
+        </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto">
-        {groupedNotifications.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full gap-2 text-low">
-            <BellIcon size={32} weight="light" />
-            <p className="text-base">No notifications yet</p>
-          </div>
-        ) : (
-          <div className="divide-y divide-border">
-            {groupedNotifications.map((group) => (
-              <div
-                key={group.id}
-                role="button"
-                tabIndex={0}
-                onClick={() => handleClick(group)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    handleClick(group);
-                  }
-                }}
-                className={cn(
-                  'w-full flex items-center gap-base px-double py-base text-left transition-colors cursor-pointer outline-none',
-                  'hover:bg-secondary',
-                  'focus-visible:bg-secondary',
-                  'focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-brand',
-                  !group.seen && 'bg-brand/5'
-                )}
-              >
-                <span
+      {!enabled ? (
+        <div className="flex items-center justify-center h-full text-low">
+          Sign in to view notifications
+        </div>
+      ) : (
+        <div className="flex-1 overflow-y-auto">
+          {groupedNotifications.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-full gap-2 text-low">
+              <BellIcon size={32} weight="light" />
+              <p className="text-base">No notifications yet</p>
+            </div>
+          ) : (
+            <div className="divide-y divide-border">
+              {groupedNotifications.map((group) => (
+                <div
+                  key={group.id}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => handleClick(group)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      handleClick(group);
+                    }
+                  }}
                   className={cn(
-                    'shrink-0 w-2 h-2 rounded-full',
-                    !group.seen && 'bg-brand'
+                    'w-full flex items-center gap-base px-double py-base text-left transition-colors cursor-pointer outline-none',
+                    'hover:bg-secondary',
+                    'focus-visible:bg-secondary',
+                    'focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-brand',
+                    !group.seen && 'bg-brand/5'
                   )}
-                />
-                <div className="flex-1 min-w-0">
-                  <p
+                >
+                  <span
                     className={cn(
-                      'text-base truncate',
-                      group.seen ? 'text-normal' : 'text-high'
+                      'shrink-0 w-2 h-2 rounded-full',
+                      !group.seen && 'bg-brand'
                     )}
-                  >
-                    <NotificationMessage
-                      segments={getGroupedNotificationSegments(group)}
-                      membersByUserId={membersByUserId}
-                    />
-                  </p>
-                  <p className="text-sm text-low mt-0.5">
-                    {formatRelativeTime(group.latest.created_at)}
-                  </p>
+                  />
+                  <div className="flex-1 min-w-0">
+                    <p
+                      className={cn(
+                        'text-base truncate',
+                        group.seen ? 'text-normal' : 'text-high'
+                      )}
+                    >
+                      <NotificationMessage
+                        segments={getGroupedNotificationSegments(group)}
+                        membersByUserId={membersByUserId}
+                      />
+                    </p>
+                    <p className="text-sm text-low mt-0.5">
+                      {formatRelativeTime(group.latest.created_at)}
+                    </p>
+                  </div>
+                  {!group.seen && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        markGroupSeen(group);
+                      }}
+                      onKeyDown={(e) => e.stopPropagation()}
+                      className={cn(
+                        'shrink-0 inline-flex items-center gap-half rounded-sm px-half py-half text-sm text-low transition-colors cursor-pointer',
+                        'hover:bg-secondary hover:text-normal',
+                        'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-brand'
+                      )}
+                      aria-label="Mark notification as read"
+                      title="Mark as read"
+                    >
+                      <CheckIcon size={14} weight="bold" />
+                      <span className="hidden sm:inline">Mark as read</span>
+                    </button>
+                  )}
                 </div>
-                {!group.seen && (
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      markGroupSeen(group);
-                    }}
-                    onKeyDown={(e) => e.stopPropagation()}
-                    className={cn(
-                      'shrink-0 inline-flex items-center gap-half rounded-sm px-half py-half text-sm text-low transition-colors cursor-pointer',
-                      'hover:bg-secondary hover:text-normal',
-                      'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-brand'
-                    )}
-                    aria-label="Mark notification as read"
-                    title="Mark as read"
-                  >
-                    <CheckIcon size={14} weight="bold" />
-                    <span className="hidden sm:inline">Mark as read</span>
-                  </button>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

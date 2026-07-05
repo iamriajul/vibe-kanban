@@ -45,13 +45,14 @@ pub type SendMessageShortcut = versions::v8::SendMessageShortcut;
 
 /// Will always return config, trying old schemas or eventually returning default
 pub async fn load_config_from_file(config_path: &PathBuf) -> Config {
-    match std::fs::read_to_string(config_path) {
+    let config = match std::fs::read_to_string(config_path) {
         Ok(raw_config) => Config::from(raw_config),
         Err(_) => {
             tracing::info!("No config file found, creating one");
             Config::default()
         }
-    }
+    };
+    config.with_environment_overrides()
 }
 
 /// Saves the config to the given path

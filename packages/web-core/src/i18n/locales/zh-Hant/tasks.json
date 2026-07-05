@@ -395,6 +395,7 @@
       "loading": "載入中",
       "send": "傳送",
       "sending": "傳送中",
+      "steer": "Steer",
       "queue": "加入佇列",
       "cancelQueue": "取消佇列",
       "requestChanges": "請求變更",

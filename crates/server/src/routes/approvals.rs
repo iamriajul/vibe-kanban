@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use axum::{
     Router,
     extract::{State, ws::Message},
@@ -74,6 +76,9 @@ async fn handle_approvals_ws(
     }
     socket.send(LogMsg::Ready.to_ws_message_unchecked()).await?;
 
+    let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
+    ping_interval.tick().await; // skip first immediate tick
+
     loop {
         tokio::select! {
             patch = stream.next() => {
@@ -98,6 +103,11 @@ async fn handle_approvals_ws(
                         tracing::warn!("approvals WS receive error: {}", error);
                         break;
                     }
+                }
+            }
+            _ = ping_interval.tick() => {
+                if socket.send(Message::Ping(vec![].into())).await.is_err() {
+                    break;
                 }
             }
         }

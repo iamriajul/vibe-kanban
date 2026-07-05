@@ -47,7 +47,10 @@
       "todoOperation": "{{operation}} 待辦事項"
     },
     "subagent": {
-      "defaultType": "子代理"
+      "defaultType": "子代理",
+      "model": "模型",
+      "effort": "推理強度",
+      "prompt": "提示詞"
     },
     "loadingEarlierMessages": "正在載入先前的訊息"
   },
@@ -83,6 +86,7 @@
     "description": "登入以加入組織並與團隊共享任務",
     "continueWithGitHub": "使用 GitHub 繼續",
     "continueWithGoogle": "使用 Google 繼續",
+    "continueWithZoho": "使用 Zoho 繼續",
     "waitingTitle": "完成身分驗證",
     "waitingDescription": "已開啟彈出視窗進行驗證",
     "waitingForAuth": "等待身分驗證...",

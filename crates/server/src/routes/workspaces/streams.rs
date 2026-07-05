@@ -7,6 +7,8 @@ use deployment::Deployment;
 use serde::Deserialize;
 use services::services::container::ContainerService;
 
+use std::time::Duration;
+
 use crate::{
     DeploymentImpl,
     middleware::signed_ws::{MaybeSignedWebSocket, SignedWsUpgrade},
@@ -68,6 +70,9 @@ async fn handle_workspace_diff_ws(
 
     let mut stream = stream.map_ok(|msg: LogMsg| msg.to_ws_message_unchecked());
 
+    let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
+    ping_interval.tick().await; // skip first immediate tick
+
     loop {
         tokio::select! {
             item = stream.next() => {
@@ -90,6 +95,11 @@ async fn handle_workspace_diff_ws(
                     Ok(Some(_)) => {}
                     Ok(None) => break,
                     Err(_) => break,
+                }
+            }
+            _ = ping_interval.tick() => {
+                if socket.send(Message::Ping(vec![].into())).await.is_err() {
+                    break;
                 }
             }
         }
@@ -111,6 +121,9 @@ async fn handle_workspaces_ws(
         .await?
         .map_ok(|msg| msg.to_ws_message_unchecked());
 
+    let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
+    ping_interval.tick().await; // skip first immediate tick
+
     loop {
         tokio::select! {
             item = stream.next() => {
@@ -133,6 +146,11 @@ async fn handle_workspaces_ws(
                     Ok(Some(_)) => {}
                     Ok(None) => break,
                     Err(_) => break,
+                }
+            }
+            _ = ping_interval.tick() => {
+                if socket.send(Message::Ping(vec![].into())).await.is_err() {
+                    break;
                 }
             }
         }

@@ -8,6 +8,11 @@ type State = {
   clearSelectedOrgId: () => void;
 };
 
+const ORGANIZATION_SELECTION_KEY_PREFIX = 'organization-selection';
+const SIGNED_OUT_SCOPE = 'signed-out';
+
+let activePersistKey: string | null = null;
+
 export const useOrganizationStore = create<State>()(
   persist(
     (set) => ({
@@ -16,11 +21,26 @@ export const useOrganizationStore = create<State>()(
       clearSelectedOrgId: () => set({ selectedOrgId: null }),
     }),
     {
-      name: 'organization-selection',
+      name: ORGANIZATION_SELECTION_KEY_PREFIX,
       partialize: (state) => ({ selectedOrgId: state.selectedOrgId }),
+      skipHydration: true,
     }
   )
 );
+
+export function hydrateOrganizationSelectionForUser(userId: string | null) {
+  const userScope = userId ?? SIGNED_OUT_SCOPE;
+  const nextPersistKey = `${ORGANIZATION_SELECTION_KEY_PREFIX}:${userScope}`;
+
+  if (activePersistKey === nextPersistKey) {
+    return;
+  }
+
+  activePersistKey = nextPersistKey;
+  useOrganizationStore.persist.setOptions({ name: nextPersistKey });
+  useOrganizationStore.setState({ selectedOrgId: null });
+  void useOrganizationStore.persist.rehydrate();
+}
 
 // Sync org store changes into the UI preferences store for server persistence
 useOrganizationStore.subscribe((state) => {

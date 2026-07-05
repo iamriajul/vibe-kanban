@@ -12,6 +12,7 @@ interface CreateSessionParams {
   workspaceId: string;
   prompt: string;
   executorConfig: ExecutorConfig;
+  name?: string;
 }
 
 /**
@@ -27,9 +28,12 @@ export function useCreateSession() {
       workspaceId,
       prompt,
       executorConfig,
+      name,
     }: CreateSessionParams): Promise<Session> => {
       const session = await sessionsApi.create({
         workspace_id: workspaceId,
+        executor: executorConfig.executor,
+        name,
       });
 
       const body: CreateFollowUpAttempt = {

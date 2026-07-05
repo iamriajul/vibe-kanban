@@ -1,7 +1,9 @@
 import { memo, useEffect, useCallback, useRef, useState, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
+  ArticleIcon,
   CaretDownIcon,
+  CodeIcon,
   CopyIcon,
   GithubLogoIcon,
   PlusIcon,
@@ -47,6 +49,7 @@ import { CopyButton } from '@/shared/components/CopyButton';
 import { writeClipboardViaBridge } from '@/shared/lib/clipboard';
 import { getFileIcon } from '@/shared/lib/fileTypeIcon';
 import { stripLineEnding, splitLines } from '@/shared/lib/string';
+import { MarkdownPreview } from '@/shared/components/MarkdownPreview';
 import { ReviewCommentRenderer } from './ReviewCommentRenderer';
 import { GitHubCommentRenderer } from './GitHubCommentRenderer';
 import { CommentWidgetLine } from './CommentWidgetLine';
@@ -323,8 +326,9 @@ const DiffFileItem = memo(function DiffFileItem({
   initialExpanded,
   workspaceId,
 }: DiffFileItemProps) {
-  const { t } = useTranslation('common');
+  const { t } = useTranslation(['common', 'tasks']);
   const filePath = diff.newPath || diff.oldPath || '';
+  const isMarkdownFile = /\.(md|mdx)$/i.test(filePath);
   const expandKey = `diff:${filePath}`;
 
   const expanded = useUiPreferencesStore(
@@ -336,6 +340,8 @@ const DiffFileItem = memo(function DiffFileItem({
   const globalMode = useDiffViewMode();
   const wrapText = useWrapTextDiff();
   const ignoreWhitespace = useIgnoreWhitespaceDiff();
+
+  const [showMarkdownPreview, setShowMarkdownPreview] = useState(isMarkdownFile);
 
   const { comments, drafts, setDraft, addComment } = useReview();
   const draftsRef = useRef(drafts);
@@ -468,6 +474,23 @@ const DiffFileItem = memo(function DiffFileItem({
             className="size-icon-xs p-0"
           />
         )}
+        {isMarkdownFile && (
+          <button
+            className="text-low hover:text-normal transition-colors"
+            title={
+              showMarkdownPreview
+                ? t('tasks:diff.markdownPreview.showDiff')
+                : t('tasks:diff.markdownPreview.showPreview')
+            }
+            onClick={() => setShowMarkdownPreview((v) => !v)}
+          >
+            {showMarkdownPreview ? (
+              <CodeIcon className="size-icon-xs" />
+            ) : (
+              <ArticleIcon className="size-icon-xs" />
+            )}
+          </button>
+        )}
         <CaretDownIcon
           className={`size-icon-xs text-low transition-transform cursor-pointer${!expanded ? ' -rotate-90' : ''}`}
           onClick={handleToggle}
@@ -482,6 +505,9 @@ const DiffFileItem = memo(function DiffFileItem({
       githubCommentCount,
       additions,
       deletions,
+      isMarkdownFile,
+      showMarkdownPreview,
+      t,
     ]
   );
 
@@ -574,15 +600,36 @@ const DiffFileItem = memo(function DiffFileItem({
 
   return (
     <div data-diff-path={filePath} className="rounded-sm">
-      <FileDiff<ExtendedCommentAnnotation>
-        fileDiff={fileDiffMetadata}
-        options={options}
-        lineAnnotations={annotations}
-        renderAnnotation={annotations ? renderAnnotation : undefined}
-        renderHeaderPrefix={renderHeaderPrefix}
-        renderHeaderMetadata={renderHeaderMetadata}
-        renderHoverUtility={expanded ? renderHoverUtility : undefined}
-      />
+      {isMarkdownFile && showMarkdownPreview ? (
+        <>
+          <div
+            className="sticky top-0 z-10 flex items-center gap-2 min-h-[40px] px-3 bg-primary rounded-t-sm font-ibm-plex-mono text-sm cursor-pointer border-b border-border"
+            onClick={handleToggle}
+          >
+            {renderHeaderPrefix()}
+            <span className="flex-1 truncate text-xs">{filePath}</span>
+            {renderHeaderMetadata()}
+          </div>
+          {expanded && (
+            <div className="bg-primary rounded-b-sm p-base overflow-auto">
+              <MarkdownPreview
+                content={diff.newContent ?? ''}
+                theme={actualTheme}
+              />
+            </div>
+          )}
+        </>
+      ) : (
+        <FileDiff<ExtendedCommentAnnotation>
+          fileDiff={fileDiffMetadata}
+          options={options}
+          lineAnnotations={annotations}
+          renderAnnotation={annotations ? renderAnnotation : undefined}
+          renderHeaderPrefix={renderHeaderPrefix}
+          renderHeaderMetadata={renderHeaderMetadata}
+          renderHoverUtility={expanded ? renderHoverUtility : undefined}
+        />
+      )}
     </div>
   );
 });

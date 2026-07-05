@@ -6,7 +6,14 @@ import { useUserContext } from '@/shared/hooks/useUserContext';
 import { useScratch } from '@/shared/hooks/useScratch';
 import { useAllOrganizationProjects } from '@/shared/hooks/useAllOrganizationProjects';
 import { useUserOrganizations } from '@/shared/hooks/useUserOrganizations';
-import { ScratchType, type DraftWorkspaceData } from 'shared/types';
+import { useOrganizationSelection } from '@/shared/hooks/useOrganizationSelection';
+import { useOrganizationMembers } from '@/shared/hooks/useOrganizationMembers';
+import { useAuth } from '@/shared/hooks/auth/useAuth';
+import {
+  MemberRole as MemberRoleEnum,
+  ScratchType,
+  type DraftWorkspaceData,
+} from 'shared/types';
 import type { Project } from 'shared/remote-types';
 import { splitMessageToTitleDescription } from '@/shared/lib/string';
 import { cn } from '@/shared/lib/utils';
@@ -69,6 +76,8 @@ const DEFAULT_WORKSPACE_SORT = {
 const PR_FILTER_OPTIONS: WorkspacePrFilter[] = ['all', 'has_pr', 'no_pr'];
 
 const SORT_BY_OPTIONS: WorkspaceSortBy[] = ['updated_at', 'created_at'];
+const CREATOR_FILTER_MINE = '__mine__';
+const CREATOR_FILTER_ALL = '__all__';
 
 interface WorkspacesSidebarContainerProps {
   onScrollToBottom?: (behavior?: 'auto' | 'smooth') => void;
@@ -251,6 +260,28 @@ function getWorkspaceSortTimestamp(
   return toTimestamp(workspace.createdAt);
 }
 
+function formatCreatorLabel(
+  ownerUserId: string,
+  currentUserId: string | null,
+  member?: { first_name: string | null; last_name: string | null; username: string | null } | null
+): string {
+  if (currentUserId && ownerUserId === currentUserId) {
+    return 'Mine';
+  }
+
+  if (member) {
+    const name = [member.first_name, member.last_name].filter(Boolean).join(' ');
+    if (name) return name;
+    if (member.username) return member.username;
+  }
+
+  if (ownerUserId.length <= 12) {
+    return ownerUserId;
+  }
+
+  return `${ownerUserId.slice(0, 8)}...`;
+}
+
 export function WorkspacesSidebarContainer({
   onScrollToBottom = () => {},
 }: WorkspacesSidebarContainerProps) {
@@ -279,9 +310,15 @@ export function WorkspacesSidebarContainer({
   );
   const [isSortDialogOpen, setIsSortDialogOpen] = useState(false);
   const [isFilterDialogOpen, setIsFilterDialogOpen] = useState(false);
+  const [creatorFilter, setCreatorFilter] =
+    useState<string>(CREATOR_FILTER_MINE);
   const { t } = useTranslation('common');
   const sortDialogTitle = t('kanban.workspaceSidebar.sortButtonTitle');
   const filterDialogTitle = t('kanban.workspaceSidebar.filterButtonTitle');
+  const creatorFilterLabel = t(
+    'kanban.workspaceSidebar.creatorFilterLabel',
+    'Creator'
+  );
 
   const layoutMode: WorkspaceLayoutMode = isAccordionLayout
     ? 'accordion'
@@ -307,8 +344,19 @@ export function WorkspacesSidebarContainer({
 
   // Remote data for project filter (all orgs)
   const { workspaces: remoteWorkspaces } = useUserContext();
+  const { userId: currentUserId } = useAuth();
   const { data: allRemoteProjects } = useAllOrganizationProjects();
   const { data: orgsData } = useUserOrganizations();
+  const { selectedOrg } = useOrganizationSelection({ organizations: orgsData });
+  const isCurrentUserAdmin = selectedOrg?.user_role === MemberRoleEnum.ADMIN;
+  const { data: orgMembers } = useOrganizationMembers(selectedOrg?.id);
+  const membersById = useMemo(() => {
+    const map = new Map<string, { first_name: string | null; last_name: string | null; username: string | null; avatar_url: string | null }>();
+    for (const m of orgMembers ?? []) {
+      map.set(m.user_id, m);
+    }
+    return map;
+  }, [orgMembers]);
   const organizations = useMemo(
     () => orgsData?.organizations ?? [],
     [orgsData?.organizations]
@@ -324,6 +372,44 @@ export function WorkspacesSidebarContainer({
     }
     return map;
   }, [remoteWorkspaces]);
+
+  // Build owner map from local workspace stream data (owner_user_id stored in local SQLite).
+  // Falls back to remote workspace data for workspaces created before this field existed.
+  const ownerByLocalId = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const ws of [...activeWorkspaces, ...archivedWorkspaces]) {
+      if (ws.ownerUserId) {
+        map.set(ws.id, ws.ownerUserId);
+      }
+    }
+    // Remote data as fallback for older workspaces without local owner_user_id
+    for (const rw of remoteWorkspaces) {
+      if (rw.local_workspace_id && !map.has(rw.local_workspace_id)) {
+        map.set(rw.local_workspace_id, rw.owner_user_id);
+      }
+    }
+    return map;
+  }, [activeWorkspaces, archivedWorkspaces, remoteWorkspaces]);
+
+  const creatorFilterOptions = useMemo(() => {
+    const ownerIds = new Set(ownerByLocalId.values());
+    const options = [
+      { value: CREATOR_FILTER_MINE, label: 'Mine' },
+      { value: CREATOR_FILTER_ALL, label: 'All' },
+    ];
+
+    for (const ownerUserId of ownerIds) {
+      if (currentUserId && ownerUserId === currentUserId) {
+        continue;
+      }
+      options.push({
+        value: ownerUserId,
+        label: formatCreatorLabel(ownerUserId, currentUserId, membersById.get(ownerUserId)),
+      });
+    }
+
+    return options;
+  }, [ownerByLocalId, currentUserId, membersById]);
 
   // Build org name lookup
   const orgNameById = useMemo(() => {
@@ -389,6 +475,33 @@ export function WorkspacesSidebarContainer({
   const hasNonDefaultSort =
     workspaceSort.sortBy !== DEFAULT_WORKSPACE_SORT.sortBy ||
     workspaceSort.sortOrder !== DEFAULT_WORKSPACE_SORT.sortOrder;
+  const effectiveCreatorFilter = useMemo(() => {
+    if (!currentUserId) {
+      return CREATOR_FILTER_ALL;
+    }
+
+    return isCurrentUserAdmin ? creatorFilter : CREATOR_FILTER_MINE;
+  }, [currentUserId, isCurrentUserAdmin, creatorFilter]);
+
+  const matchesCreatorFilter = useCallback(
+    (workspaceId: string) => {
+      if (effectiveCreatorFilter === CREATOR_FILTER_ALL) {
+        return true;
+      }
+
+      const ownerUserId = ownerByLocalId.get(workspaceId);
+      if (!ownerUserId) {
+        return false;
+      }
+
+      if (effectiveCreatorFilter === CREATOR_FILTER_MINE) {
+        return !!currentUserId && ownerUserId === currentUserId;
+      }
+
+      return ownerUserId === effectiveCreatorFilter;
+    },
+    [effectiveCreatorFilter, ownerByLocalId, currentUserId]
+  );
 
   // Pagination state for infinite scroll
   const [displayLimit, setDisplayLimit] = useState(PAGE_SIZE);
@@ -396,7 +509,13 @@ export function WorkspacesSidebarContainer({
   // Reset display limit when search, filter, or sort state changes
   useEffect(() => {
     setDisplayLimit(PAGE_SIZE);
-  }, [searchQuery, showArchive, workspaceFilters, workspaceSort]);
+  }, [
+    searchQuery,
+    showArchive,
+    workspaceFilters,
+    workspaceSort,
+    effectiveCreatorFilter,
+  ]);
 
   const searchLower = searchQuery.toLowerCase();
   const isSearching = searchQuery.length > 0;
@@ -404,6 +523,9 @@ export function WorkspacesSidebarContainer({
   // Apply sidebar filters (project + PR), then search
   const filteredActiveWorkspaces = useMemo(() => {
     let result = activeWorkspaces;
+
+    // Creator filter
+    result = result.filter((ws) => matchesCreatorFilter(ws.id));
 
     // Project filter
     if (workspaceFilters.projectIds.length > 0) {
@@ -436,10 +558,18 @@ export function WorkspacesSidebarContainer({
     }
 
     return result;
-  }, [activeWorkspaces, workspaceFilters, remoteProjectByLocalId, searchLower]);
+  }, [
+    activeWorkspaces,
+    matchesCreatorFilter,
+    workspaceFilters,
+    remoteProjectByLocalId,
+    searchLower,
+  ]);
 
   const filteredArchivedWorkspaces = useMemo(() => {
     let result = archivedWorkspaces;
+
+    result = result.filter((ws) => matchesCreatorFilter(ws.id));
 
     if (workspaceFilters.projectIds.length > 0) {
       const includeNoProject =
@@ -471,6 +601,7 @@ export function WorkspacesSidebarContainer({
     return result;
   }, [
     archivedWorkspaces,
+    matchesCreatorFilter,
     workspaceFilters,
     remoteProjectByLocalId,
     searchLower,
@@ -534,6 +665,29 @@ export function WorkspacesSidebarContainer({
         ? sortedArchivedWorkspaces
         : sortedArchivedWorkspaces.slice(0, displayLimit),
     [sortedArchivedWorkspaces, displayLimit, isSearching]
+  );
+
+  // Attach owner profile to workspaces when not in "Mine" mode
+  const showOwnerAvatars = effectiveCreatorFilter !== CREATOR_FILTER_MINE;
+  const withOwner = useCallback(
+    (ws: Workspace) => {
+      if (!showOwnerAvatars) return ws;
+      const ownerId = ownerByLocalId.get(ws.id);
+      if (!ownerId || ownerId === currentUserId) return ws;
+      const member = membersById.get(ownerId);
+      return member ? { ...ws, owner: member } : ws;
+    },
+    [showOwnerAvatars, ownerByLocalId, currentUserId, membersById]
+  );
+
+  const sidebarActiveWorkspaces = useMemo(
+    () => paginatedActiveWorkspaces.map(withOwner),
+    [paginatedActiveWorkspaces, withOwner]
+  );
+
+  const sidebarArchivedWorkspaces = useMemo(
+    () => paginatedArchivedWorkspaces.map(withOwner),
+    [paginatedArchivedWorkspaces, withOwner]
   );
 
   // Check if there are more workspaces to load
@@ -611,6 +765,15 @@ export function WorkspacesSidebarContainer({
 
   const searchControls = (
     <>
+      {isCurrentUserAdmin && (
+        <PropertyDropdown
+          value={creatorFilter}
+          options={creatorFilterOptions}
+          onChange={setCreatorFilter}
+          label={creatorFilterLabel}
+        />
+      )}
+
       <div className="shrink-0">
         <div className="flex items-stretch">
           <IconButton
@@ -679,9 +842,9 @@ export function WorkspacesSidebarContainer({
 
   return (
     <WorkspacesSidebar
-      workspaces={paginatedActiveWorkspaces}
+      workspaces={sidebarActiveWorkspaces}
       totalWorkspacesCount={activeWorkspaces.length}
-      archivedWorkspaces={paginatedArchivedWorkspaces}
+      archivedWorkspaces={sidebarArchivedWorkspaces}
       isLoading={isWorkspacesListLoading}
       selectedWorkspaceId={selectedWorkspaceId ?? null}
       onSelectWorkspace={handleSelectWorkspace}
